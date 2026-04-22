@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  maxine-ar-sdk-webcam:
+    image: ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+    devices:
+      - /dev/video0:/dev/video0
+      - /dev/video10:/dev/video10
+    command: ["/usr/local/bin/maxine_ar_webcam", "--mjpeg", "/dev/video10", "1920", "1080"]
+    # Override for lower resolutions / no MJPEG:
+    # command: ["/usr/local/bin/maxine_ar_webcam", "/dev/video10", "640", "480"]

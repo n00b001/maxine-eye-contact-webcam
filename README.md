@@ -35,24 +35,81 @@ inference on the GPU, and writes directly to a v4l2loopback device.
 
 ### Quick Start (Docker)
 
-```bash
-# Build the image (ARSDK is copied from /usr/local/ARSDK)
-cd docker/
-docker build -t arsdk-gaze:latest .
+#### Option A: Pull pre-built image from GHCR (no build required)
 
-# Run
+A GitHub Actions workflow builds and publishes the image to GitHub Container
+Registry. You only need to log in to GHCR and pull:
+
+```bash
+# Log in to GHCR (uses your GitHub Personal Access Token with read:packages)
+echo $GITHUB_TOKEN | docker login ghcr.io -u n00b001 --password-stdin
+
+# Pull and run
 docker run -d --rm --gpus all \
   --device /dev/video0 --device /dev/video10 \
   -e NVIDIA_VISIBLE_DEVICES=all \
   -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
-  arsdk-gaze:latest \
+  ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest \
   /usr/local/bin/maxine_ar_webcam --mjpeg /dev/video10 1920 1080
 ```
 
-Options:
+#### Option B: Build locally (ARSDK required)
+
+If you prefer to build yourself (or the GHCR image is not yet published):
+
+```bash
+cd docker/
+# ARSDK is copied from /usr/local/ARSDK (proprietary, not in repo)
+docker build -t arsdk-gaze:latest .
+```
+
+#### Option C: Docker Compose
+
+```bash
+# Uses the GHCR image by default
+docker compose up -d
+```
+
+See `docker-compose.yml` (single node) or `docker-stack.yml` (Docker Swarm).
+
+#### CLI Options
 - `--mjpeg` — request MJPEG from the camera (required for 720p/1080p @ 30 fps)
 - `--no-warmup` — skip the default 30-frame warmup
 - Arguments: `[v4l2-device] [width] [height]` (default: `/dev/video10 640 480`)
+
+### GitHub Actions CI / GHCR Publishing
+
+The repo includes `.github/workflows/docker-build.yml` which builds the image
+and pushes it to GitHub Container Registry (GHCR).
+
+**Important:** The NVIDIA AR SDK is proprietary and cannot be committed to a
+public repository. Therefore the workflow **must run on a self-hosted runner**
+that already has ARSDK installed at `/usr/local/ARSDK`.
+
+#### Set up the self-hosted runner (one-time)
+
+On the host machine with ARSDK:
+
+```bash
+# 1. Create a GitHub runner directory
+mkdir -p ~/actions-runner && cd ~/actions-runner
+
+# 2. Download the latest runner (check GitHub docs for current version)
+curl -o actions-runner-linux-x64-2.320.0.tar.gz -L \
+  https://github.com/actions/runner/releases/download/v2.320.0/actions-runner-linux-x64-2.320.0.tar.gz
+tar xzf actions-runner-linux-x64-2.320.0.tar.gz
+
+# 3. Configure (get token from GitHub repo Settings > Actions > Runners)
+./config.sh --url https://github.com/n00b001/maxine-eye-contact-webcam --token <RUNNER_TOKEN>
+
+# 4. Install and start as a service
+./svc.sh install
+./svc.sh start
+```
+
+Once the runner is online, the workflow will trigger automatically on every
+push to `main` (and version tags). You can also trigger it manually via the
+**Actions** tab.
 
 ### Systemd Service (Auto-start)
 
