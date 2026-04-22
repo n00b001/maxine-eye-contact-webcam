@@ -37,22 +37,38 @@ static int set_v4l2_format(int fd, int width, int height, uint32_t pixelformat) 
     return ioctl(fd, VIDIOC_S_FMT, &fmt);
 }
 
+static float env_or_default_f(const char* name, float def) {
+    const char* v = getenv(name);
+    return v ? (float)atof(v) : def;
+}
+static int env_or_default_i(const char* name, int def) {
+    const char* v = getenv(name);
+    return v ? atoi(v) : def;
+}
+static bool env_enabled(const char* name) {
+    const char* v = getenv(name);
+    return v && (strcmp(v, "1") == 0 || strcmp(v, "true") == 0 || strcmp(v, "yes") == 0);
+}
+
 int main(int argc, char** argv) {
     const char* modelPath = getenv("NVAR_MODEL_DIR");
     if (!modelPath) modelPath = "/usr/local/ARSDK/lib/models";
 
     bool doWarmup = true;
     bool useMjpeg = false;
+
+    // Parse flags first
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--no-warmup") == 0) doWarmup = false;
+        else if (strcmp(argv[i], "--mjpeg") == 0) useMjpeg = true;
+    }
+
+    // Positional args (skip flags): [v4l2Dev] [width] [height]
     int posArgIdx = 0;
     const char* posArgs[3] = {nullptr, nullptr, nullptr};
     for (int i = 1; i < argc; ++i) {
-        if (strcmp(argv[i], "--no-warmup") == 0) {
-            doWarmup = false;
-        } else if (strcmp(argv[i], "--mjpeg") == 0) {
-            useMjpeg = true;
-        } else if (posArgIdx < 3) {
-            posArgs[posArgIdx++] = argv[i];
-        }
+        if (argv[i][0] == '-') continue;  // skip flags and --options
+        if (posArgIdx < 3) posArgs[posArgIdx++] = argv[i];
     }
 
     const char* v4l2Dev = posArgs[0] ? posArgs[0] : "/dev/video10";
@@ -66,9 +82,7 @@ int main(int argc, char** argv) {
     // Open camera
     const char* camDevice = getenv("CAMERA_DEVICE");
     int camIndex = 0;
-    if (camDevice) {
-        camIndex = atoi(camDevice);
-    }
+    if (camDevice) camIndex = atoi(camDevice);
     cv::VideoCapture cap(camIndex, cv::CAP_V4L2);
     if (!cap.isOpened()) {
         fprintf(stderr, "Failed to open camera index %d\n", camIndex);
@@ -104,9 +118,28 @@ int main(int argc, char** argv) {
     GazeEngine engine;
     engine.setInputImageWidth(width);
     engine.setInputImageHeight(height);
-    engine.setGazeRedirect(true);
-    engine.setUseCudaGraph(true);
-    engine.setFaceStabilization(true);
+
+    // Apply tunable parameters from env vars (overridable via CLI later if needed)
+    engine.setGazeRedirect(!env_enabled("GAZE_NO_REDIRECT"));
+    engine.setFaceStabilization(!env_enabled("GAZE_NO_STABILIZE"));
+    engine.setUseCudaGraph(!env_enabled("GAZE_NO_CUDA_GRAPH"));
+
+    int landmarks = env_or_default_i("GAZE_LANDMARKS", 68);
+    if (engine.setNumLandmarks(landmarks) != GazeEngine::errNone) {
+        fprintf(stderr, "Warning: unsupported landmarks count %d, using 68\n", landmarks);
+        engine.setNumLandmarks(68);
+    }
+
+    engine.setEyeSizeSensitivity((unsigned)env_or_default_i("GAZE_EYE_SIZE", 3));
+
+    engine.setGazePitchThresholdLow(env_or_default_f("GAZE_PITCH_LOW", 20.0f));
+    engine.setGazePitchThresholdHigh(env_or_default_f("GAZE_PITCH_HIGH", 30.0f));
+    engine.setGazeYawThresholdLow(env_or_default_f("GAZE_YAW_LOW", 20.0f));
+    engine.setGazeYawThresholdHigh(env_or_default_f("GAZE_YAW_HIGH", 30.0f));
+    engine.setHeadPitchThresholdLow(env_or_default_f("GAZE_HEAD_PITCH_LOW", 15.0f));
+    engine.setHeadPitchThresholdHigh(env_or_default_f("GAZE_HEAD_PITCH_HIGH", 25.0f));
+    engine.setHeadYawThresholdLow(env_or_default_f("GAZE_HEAD_YAW_LOW", 25.0f));
+    engine.setHeadYawThresholdHigh(env_or_default_f("GAZE_HEAD_YAW_HIGH", 30.0f));
 
     GazeEngine::Err err = engine.createGazeRedirectionFeature(modelPath);
     if (err != GazeEngine::errNone) {
@@ -166,7 +199,6 @@ int main(int argc, char** argv) {
                 break;
             }
         } else {
-            // Write row by row if not continuous
             for (int y = 0; y < out.rows; ++y) {
                 ssize_t written = write(v4l2Fd, out.ptr(y), out.cols * out.elemSize());
                 if (written < 0) {
