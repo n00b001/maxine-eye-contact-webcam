@@ -12,6 +12,21 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=maxine-ar-sdk-webcam
 
+# Gaze redirection tuning (see README for descriptions)
+Environment="GAZE_EYE_SIZE=3"
+Environment="GAZE_LANDMARKS=68"
+# Environment="GAZE_NO_REDIRECT=0"
+# Environment="GAZE_NO_STABILIZE=0"
+# Environment="GAZE_NO_CUDA_GRAPH=0"
+# Environment="GAZE_PITCH_LOW=20.0"
+# Environment="GAZE_PITCH_HIGH=30.0"
+# Environment="GAZE_YAW_LOW=20.0"
+# Environment="GAZE_YAW_HIGH=30.0"
+# Environment="GAZE_HEAD_PITCH_LOW=15.0"
+# Environment="GAZE_HEAD_PITCH_HIGH=25.0"
+# Environment="GAZE_HEAD_YAW_LOW=25.0"
+# Environment="GAZE_HEAD_YAW_HIGH=30.0"
+
 # Pull latest image and run
 ExecStartPre=-/usr/bin/docker pull ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest
 ExecStartPre=-/usr/bin/docker rm -f maxine-ar-sdk-webcam
@@ -24,6 +39,19 @@ ExecStart=/usr/bin/docker run \
     --device /dev/video10 \
     -e NVIDIA_VISIBLE_DEVICES=all \
     -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
+    -e GAZE_EYE_SIZE=${GAZE_EYE_SIZE} \
+    -e GAZE_LANDMARKS=${GAZE_LANDMARKS} \
+    -e GAZE_NO_REDIRECT=${GAZE_NO_REDIRECT} \
+    -e GAZE_NO_STABILIZE=${GAZE_NO_STABILIZE} \
+    -e GAZE_NO_CUDA_GRAPH=${GAZE_NO_CUDA_GRAPH} \
+    -e GAZE_PITCH_LOW=${GAZE_PITCH_LOW} \
+    -e GAZE_PITCH_HIGH=${GAZE_PITCH_HIGH} \
+    -e GAZE_YAW_LOW=${GAZE_YAW_LOW} \
+    -e GAZE_YAW_HIGH=${GAZE_YAW_HIGH} \
+    -e GAZE_HEAD_PITCH_LOW=${GAZE_HEAD_PITCH_LOW} \
+    -e GAZE_HEAD_PITCH_HIGH=${GAZE_HEAD_PITCH_HIGH} \
+    -e GAZE_HEAD_YAW_LOW=${GAZE_HEAD_YAW_LOW} \
+    -e GAZE_HEAD_YAW_HIGH=${GAZE_HEAD_YAW_HIGH} \
     ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest \
     /usr/local/bin/maxine_ar_webcam --mjpeg /dev/video10 1920 1080
 

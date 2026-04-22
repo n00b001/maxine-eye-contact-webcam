@@ -102,6 +102,49 @@ See `docker-compose.yml` (single node) or `docker-stack.yml` (Docker Swarm).
 - `--no-warmup` — skip the default 30-frame warmup
 - Arguments: `[v4l2-device] [width] [height]` (default: `/dev/video10 640 480`)
 
+#### Tunable Gaze Parameters
+
+The gaze redirection behavior can be customized via **environment variables** (passed through by the systemd service):
+
+| Variable | Default | Range | Description |
+|----------|---------|-------|-------------|
+| `GAZE_EYE_SIZE` | `3` | `2`–`5` | Eye region size for redirection. Larger = bigger eye area modified. |
+| `GAZE_LANDMARKS` | `68` | `68`, `126` | Number of facial landmarks tracked. |
+| `GAZE_NO_REDIRECT` | `0` | `0`/`1` | Set to `1` to disable gaze redirection (estimation only). |
+| `GAZE_NO_STABILIZE` | `0` | `0`/`1` | Set to `1` to disable temporal face stabilization. |
+| `GAZE_NO_CUDA_GRAPH` | `0` | `0`/`1` | Set to `1` to disable CUDA Graph optimization. |
+| `GAZE_PITCH_LOW` | `20.0` | `10.0`–`35.0` | Lower pitch threshold (°). Inside this angle, gaze is fully redirected to camera. |
+| `GAZE_PITCH_HIGH` | `30.0` | `10.0`–`35.0` | Upper pitch threshold (°). Beyond this, no redirection occurs. |
+| `GAZE_YAW_LOW` | `20.0` | `10.0`–`35.0` | Lower yaw threshold (°). Same behavior as pitch but for yaw. |
+| `GAZE_YAW_HIGH` | `30.0` | `10.0`–`35.0` | Upper yaw threshold (°). |
+| `GAZE_HEAD_PITCH_LOW` | `15.0` | `10.0`–`35.0` | Lower head-pose pitch threshold (°). |
+| `GAZE_HEAD_PITCH_HIGH` | `25.0` | `10.0`–`35.0` | Upper head-pose pitch threshold (°). |
+| `GAZE_HEAD_YAW_LOW` | `25.0` | `10.0`–`35.0` | Lower head-pose yaw threshold (°). |
+| `GAZE_HEAD_YAW_HIGH` | `30.0` | `10.0`–`35.0` | Upper head-pose yaw threshold (°). |
+
+**How thresholds work:** Between `*Low` and `*High`, the redirected gaze linearly transitions from full camera-facing to estimated natural gaze. Above the high threshold, no redirection is applied.
+
+**To change parameters:**
+
+```bash
+# Edit the service environment variables
+sudo systemctl edit maxine-ar-sdk-webcam --full
+# Change the Environment= lines, save, then:
+sudo systemctl daemon-reload
+sudo systemctl restart maxine-ar-sdk-webcam
+```
+
+Or test once with `docker run`:
+
+```bash
+docker run -d --rm --gpus all --device /dev/video0 --device /dev/video10 \
+  -e GAZE_EYE_SIZE=4 \
+  -e GAZE_PITCH_LOW=15.0 \
+  -e GAZE_PITCH_HIGH=25.0 \
+  ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest \
+  /usr/local/bin/maxine_ar_webcam --mjpeg /dev/video10 1920 1080
+```
+
 ### GitHub Actions CI / GHCR Publishing
 
 The repo includes `.github/workflows/docker-build.yml` which builds the image
