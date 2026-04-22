@@ -35,13 +35,31 @@ inference on the GPU, and writes directly to a v4l2loopback device.
 
 ### Quick Start (Docker)
 
-#### Option A: Pull pre-built image from GHCR (no build required)
+#### Option A: One-command setup (recommended)
 
-A GitHub Actions workflow builds and publishes the image to GitHub Container
-Registry. You only need to log in to GHCR and pull:
+Run `setup.sh` to install all host dependencies, configure the virtual webcam,
+pull the pre-built GHCR image, and start the systemd service:
 
 ```bash
-# Log in to GHCR (uses your GitHub Personal Access Token with read:packages)
+# 1. Log in to GHCR (one-time)
+echo $GITHUB_TOKEN | docker login ghcr.io -u n00b001 --password-stdin
+
+# 2. Run the setup script
+./setup.sh
+```
+
+That's it. The script will:
+- Install `ffmpeg`, `v4l2loopback-dkms`, `v4l-utils`, and kernel headers
+- Load and persist the `v4l2loopback` kernel module (`/dev/video10`)
+- Pull `ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest`
+- Install and start the systemd service
+
+#### Option B: Manual Docker run
+
+If you prefer not to use the setup script:
+
+```bash
+# Log in to GHCR
 echo $GITHUB_TOKEN | docker login ghcr.io -u n00b001 --password-stdin
 
 # Pull and run
@@ -53,7 +71,7 @@ docker run -d --rm --gpus all \
   /usr/local/bin/maxine_ar_webcam --mjpeg /dev/video10 1920 1080
 ```
 
-#### Option B: Build locally (ARSDK required)
+#### Option C: Build locally (ARSDK required)
 
 If you prefer to build yourself (or the GHCR image is not yet published):
 
@@ -70,7 +88,7 @@ docker build -f Dockerfile.base -t ghcr.io/n00b001/maxine-eye-contact-webcam/ars
 docker build -t arsdk-gaze:latest .
 ```
 
-#### Option C: Docker Compose
+#### Option D: Docker Compose
 
 ```bash
 # Uses the GHCR image by default
@@ -142,11 +160,13 @@ No self-hosted runner required — it runs on `ubuntu-latest`.
 
 ### Systemd Service (Auto-start)
 
+`setup.sh` installs and enables the service automatically. To manage it manually:
+
 ```bash
-sudo cp maxine-ar-sdk-webcam.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now maxine-ar-sdk-webcam.service
-sudo journalctl -u maxine-ar-sdk-webcam -f
+sudo systemctl start  maxine-ar-sdk-webcam   # start
+sudo systemctl stop   maxine-ar-sdk-webcam   # stop
+sudo systemctl status maxine-ar-sdk-webcam   # status
+sudo journalctl -u maxine-ar-sdk-webcam -f   # follow logs
 ```
 
 ---
