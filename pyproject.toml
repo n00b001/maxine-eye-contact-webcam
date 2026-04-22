@@ -1,0 +1,24 @@
+[project]
+name = "maxine-eye-contact-webcam"
+version = "0.1.0"
+description = "Real-time webcam pipeline for NVIDIA Maxine Eye Contact NIM -> virtual webcam (v4l2loopback)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "grpcio>=1.62.0",
+    "protobuf>=4.25.0",
+    "numpy>=1.24.0",
+    "opencv-python>=4.9.0",
+]
+
+[project.scripts]
+maxine-webcam = "maxine_webcam_pipeline:main"
+
+[dependency-groups]
+dev = [
+    "grpcio-tools>=1.62.0",
+]
+
+[tool.uv]
+python-preference = "only-managed"

@@ -1,0 +1,33 @@
+[Unit]
+Description=Maxine AR SDK Native Gaze Redirection Webcam
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=maxine-ar-sdk-webcam
+
+# Pull latest image and run
+ExecStartPre=-/usr/bin/docker pull arsdk-gaze:latest
+ExecStartPre=-/usr/bin/docker rm -f maxine-ar-sdk-webcam
+
+ExecStart=/usr/bin/docker run \
+    --rm \
+    --name maxine-ar-sdk-webcam \
+    --gpus all \
+    --device /dev/video0 \
+    --device /dev/video10 \
+    -e NVIDIA_VISIBLE_DEVICES=all \
+    -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
+    arsdk-gaze:latest \
+    /usr/local/bin/maxine_ar_webcam --mjpeg /dev/video10 1920 1080
+
+ExecStop=/usr/bin/docker stop -t 5 maxine-ar-sdk-webcam
+ExecStopPost=-/usr/bin/docker rm -f maxine-ar-sdk-webcam
+
+[Install]
+WantedBy=multi-user.target

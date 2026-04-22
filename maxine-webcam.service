@@ -1,0 +1,20 @@
+[Unit]
+Description=Maxine Eye Contact Webcam Pipeline
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User=%I
+Environment="NGC_API_KEY_FILE=/etc/nvidia-nim/api.key"
+Environment="PYTHONUNBUFFERED=1"
+WorkingDirectory=/opt/maxine-eye-contact-webcam
+ExecStart=/usr/bin/env bash -c 'export PATH="$HOME/.local/bin:$PATH" && cd /opt/maxine-eye-contact-webcam && uv run python maxine_webcam_pipeline.py --nim 127.0.0.1:8003 --input /dev/video0 --output /dev/video10 --resolution 720p --fps 30'
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=maxine-webcam
+
+[Install]
+WantedBy=multi-user.target
