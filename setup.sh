@@ -1,167 +1,206 @@
 #!/usr/bin/env bash
-# Maxine Eye Contact Webcam Pipeline - Ubuntu 25 Setup (uv workflow)
+# Maxine Eye Contact Webcam Pipeline – Unified Setup
+# Sets up v4l2loopback virtual webcam, system deps, and both pipeline options.
 set -euo pipefail
 
-echo "============================================"
-echo "  Setup: Maxine Eye Contact Webcam Pipeline"
-echo "  Ubuntu 25.04+ | RTX 4090 Optimized"
-echo "  Using astral.sh uv"
-echo "============================================"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
 # ---------------------------------------------------------------------------
-# 0. Ensure uv is installed
+# Helpers
 # ---------------------------------------------------------------------------
-if ! command -v uv &> /dev/null; then
-    echo ""
-    echo "[0/6] Installing uv (astral.sh)..."
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    # Ensure uv is on PATH for this shell
-    export PATH="$HOME/.local/bin:$PATH"
-fi
-uv --version
+info()  { echo ""; echo "[INFO] $*"; }
+ok()    { echo "  ✓ $*"; }
+warn()  { echo "  ⚠ $*"; }
+fail()  { echo "  ✗ $*"; exit 1; }
 
 # ---------------------------------------------------------------------------
 # 1. System dependencies
 # ---------------------------------------------------------------------------
-echo ""
-echo "[1/6] Installing system dependencies..."
-sudo apt-get update
-sudo apt-get install -y \
+info "Installing system dependencies..."
+sudo apt-get update -qq
+sudo apt-get install -y -qq \
     ffmpeg \
     v4l2loopback-dkms \
     v4l2loopback-utils \
     v4l-utils \
     git \
     wget \
-    linux-headers-$(uname -r)
+    curl \
+    linux-headers-$(uname -r) \
+    || fail "Failed to install system dependencies"
+ok "System dependencies installed"
 
 # ---------------------------------------------------------------------------
-# 2. v4l2loopback kernel module (auto-load on boot)
+# 2. Virtual webcam (v4l2loopback) – create & persist
 # ---------------------------------------------------------------------------
-echo ""
-echo "[2/6] Configuring v4l2loopback virtual webcam..."
+info "Configuring v4l2loopback virtual webcam..."
 
-if ! lsmod | grep -q v4l2loopback; then
-    echo "      Loading v4l2loopback kernel module..."
+# Load the module now (if not already loaded)
+if ! lsmod | grep -q "^v4l2loopback"; then
     sudo modprobe v4l2loopback \
         devices=1 \
         video_nr=10 \
         card_label="MaxineEyeContact" \
         exclusive_caps=1 \
         max_buffers=4
+    ok "v4l2loopback kernel module loaded"
 else
-    echo "      v4l2loopback already loaded"
+    ok "v4l2loopback already loaded"
 fi
 
+# Persistent modprobe config (survives reboots)
 V4L2_CONF="/etc/modprobe.d/v4l2loopback.conf"
 if [ ! -f "$V4L2_CONF" ]; then
-    echo "      Creating persistent config..."
     sudo tee "$V4L2_CONF" > /dev/null <<'EOF'
 options v4l2loopback devices=1 video_nr=10 card_label="MaxineEyeContact" exclusive_caps=1 max_buffers=4
 EOF
+    ok "Created $V4L2_CONF (persistent module options)"
+else
+    ok "$V4L2_CONF already exists"
 fi
 
+# Auto-load on boot
 MODULES_LOAD="/etc/modules-load.d/v4l2loopback.conf"
 if [ ! -f "$MODULES_LOAD" ]; then
-    echo "      Enabling auto-load on boot..."
     echo "v4l2loopback" | sudo tee "$MODULES_LOAD" > /dev/null
+    ok "Created $MODULES_LOAD (auto-load on boot)"
+else
+    ok "$MODULES_LOAD already exists"
 fi
 
+# Verify device exists
 if [ -e /dev/video10 ]; then
-    echo "      Virtual webcam ready: /dev/video10"
-    v4l2-ctl -d /dev/video10 --all 2>/dev/null | head -5
+    ok "Virtual webcam ready: /dev/video10"
+    v4l2-ctl -d /dev/video10 --all 2>/dev/null | head -3 | sed 's/^/        /'
 else
-    echo "      WARNING: /dev/video10 not found. Available devices:"
-    ls -la /dev/video* 2>/dev/null || echo "      (none found)"
+    warn "/dev/video10 not found. Available devices:"
+    ls -la /dev/video* 2>/dev/null | sed 's/^/        /' || true
 fi
 
 # ---------------------------------------------------------------------------
 # 3. NVIDIA runtime check
 # ---------------------------------------------------------------------------
-echo ""
-echo "[3/6] Checking NVIDIA runtime..."
+info "Checking NVIDIA GPU & Docker runtime..."
 
 if command -v nvidia-smi &> /dev/null; then
-    nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
+    GPU_INFO=$(nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>/dev/null || true)
+    ok "GPU: $GPU_INFO"
 else
-    echo "      WARNING: nvidia-smi not found. Install NVIDIA drivers first:"
-    echo "      https://developer.nvidia.com/cuda-downloads?target_os=Linux"
+    warn "nvidia-smi not found. Install NVIDIA drivers:"
+    warn "  https://developer.nvidia.com/cuda-downloads?target_os=Linux"
 fi
 
 if command -v docker &> /dev/null; then
     if docker info 2>/dev/null | grep -q nvidia; then
-        echo "      Docker NVIDIA runtime: OK"
+        ok "Docker NVIDIA runtime: OK"
     else
-        echo "      WARNING: Docker nvidia runtime not configured."
-        echo "      Install nvidia-container-toolkit:"
-        echo "        https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html"
+        warn "Docker NVIDIA runtime not configured."
+        warn "  Install nvidia-container-toolkit:"
+        warn "  https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html"
     fi
 else
-    echo "      WARNING: Docker not found. You need Docker to run the NIM."
+    warn "Docker not found. Required for both pipelines."
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Python project setup (uv-managed Python + venv)
+# 4. Native AR SDK Docker pipeline (optional)
 # ---------------------------------------------------------------------------
-echo ""
-echo "[4/6] Setting up uv project environment..."
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+info "Checking for NVIDIA AR SDK..."
 
-# Ensure a managed Python version is available and pinned
+if [ -d "/usr/local/ARSDK/lib" ]; then
+    ok "ARSDK found at /usr/local/ARSDK"
+
+    if [ -d "$SCRIPT_DIR/docker/arsdk" ]; then
+        ok "Build context already has ARSDK copy"
+    else
+        info "Copying ARSDK into docker build context (~5 GB, hard-linked)..."
+        cp -rl /usr/local/ARSDK "$SCRIPT_DIR/docker/arsdk"
+        ok "ARSDK copied to docker/arsdk/"
+    fi
+
+    info "Building Docker image 'arsdk-gaze:latest'..."
+    cd "$SCRIPT_DIR/docker"
+    docker build -t arsdk-gaze:latest . || warn "Docker build failed (check ARSDK integrity)"
+    cd "$SCRIPT_DIR"
+    ok "Docker image 'arsdk-gaze:latest' ready"
+
+    info "Installing systemd service for native pipeline..."
+    sudo cp "$SCRIPT_DIR/maxine-ar-sdk-webcam.service" /etc/systemd/system/
+    sudo systemctl daemon-reload
+    sudo systemctl enable maxine-ar-sdk-webcam.service
+    ok "Native pipeline service installed (start with: sudo systemctl start maxine-ar-sdk-webcam)"
+else
+    warn "ARSDK not found at /usr/local/ARSDK"
+    warn "  Skipping native C++ pipeline build."
+    warn "  Install ARSDK or use the Python NIM pipeline below."
+fi
+
+# ---------------------------------------------------------------------------
+# 5. Python NIM pipeline (optional)
+# ---------------------------------------------------------------------------
+info "Setting up Python NIM pipeline..."
+
+if ! command -v uv &> /dev/null; then
+    info "Installing uv (astral.sh)..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+fi
+ok "uv: $(uv --version)"
+
+# Pin Python 3.12
 uv python install 3.12
 if [ ! -f ".python-version" ]; then
     uv python pin 3.12
 fi
 
-# Create venv and sync dependencies from pyproject.toml + uv.lock
+# Sync deps
 uv sync
+ok "Python environment ready"
 
-# ---------------------------------------------------------------------------
-# 5. Build protobuf definitions
-# ---------------------------------------------------------------------------
-echo ""
-echo "[5/6] Building gRPC protobuf definitions..."
+# Build protobufs if missing
 if [ ! -f "eyecontact_pb2.py" ] || [ ! -f "eyecontact_pb2_grpc.py" ]; then
     bash build_proto.sh
+    ok "Protobuf definitions built"
 else
-    echo "      Protobuf files already exist, skipping build"
-    echo "      (Run ./build_proto.sh to force rebuild)"
+    ok "Protobuf definitions already exist"
 fi
 
-# ---------------------------------------------------------------------------
-# 6. Verify setup
-# ---------------------------------------------------------------------------
-echo ""
-echo "[6/6] Verifying setup..."
-uv run maxine_webcam_pipeline.py --help > /dev/null 2>&1 && echo "      Pipeline script: OK" || echo "      Pipeline script: MISSING DEPS"
+# Install systemd service for Python NIM pipeline
+sudo cp "$SCRIPT_DIR/maxine-webcam.service" /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable maxine-webcam.service
+ok "Python NIM service installed (start with: sudo systemctl start maxine-webcam)"
 
-FFMPEG_V=$(ffmpeg -version 2>/dev/null | head -1 | awk '{print $3}')
-if [ -n "$FFMPEG_V" ]; then
-    if ffmpeg -encoders 2>/dev/null | grep -q h264_nvenc; then
-        echo "      FFmpeg: $FFMPEG_V (NVENC: YES)"
-    else
-        echo "      FFmpeg: $FFMPEG_V (NVENC: NO - install with --enable-nvenc)"
-    fi
-else
-    echo "      FFmpeg: MISSING"
-fi
-
+# ---------------------------------------------------------------------------
+# 6. Summary
+# ---------------------------------------------------------------------------
 echo ""
 echo "============================================"
 echo "  Setup complete!"
+echo "============================================"
 echo ""
-echo "  Next steps:"
-echo "    1. Ensure NIM docker is running:"
-echo "       docker run -it --rm --name=maxine-eye-contact-nim \\"
-echo "         --runtime=nvidia --gpus all --shm-size=6GB \\"
-echo "         -e NGC_API_KEY=\$NGC_API_KEY \\"
-echo "         -e MAXINE_MAX_CONCURRENCY_PER_GPU=1 \\"
-echo "         -p 8002:8000 -p 8003:8001 \\"
-echo "         nvcr.io/nim/nvidia/maxine-eye-contact:latest"
+echo "  Virtual webcam: /dev/video10"
+echo "  Persistence:    v4l2loopback will auto-load on boot"
 echo ""
-echo "    2. Run the pipeline with uv:"
-echo "       uv run maxine_webcam_pipeline.py --target 127.0.0.1:8003"
+echo "  ── Native AR SDK Pipeline (low latency ~33ms) ──"
+if [ -d "/usr/local/ARSDK/lib" ]; then
+    echo "  Status:         READY"
+    echo "  Image:          arsdk-gaze:latest"
+    echo "  Service:        sudo systemctl start maxine-ar-sdk-webcam"
+    echo "  Manual run:     docker compose up -d"
+else
+    echo "  Status:         NOT BUILT (ARSDK missing)"
+fi
 echo ""
-echo "    3. Select 'MaxineEyeContact' in your video conferencing app"
+echo "  ── Python NIM Pipeline (~1–2s latency) ──"
+echo "  Status:         READY"
+echo "  Service:        sudo systemctl start maxine-webcam"
+echo "  Manual run:     uv run maxine_webcam_pipeline.py --resolution 480p"
+echo ""
+echo "  ── Logs ──"
+echo "  Native:  sudo journalctl -u maxine-ar-sdk-webcam -f"
+echo "  Python:  sudo journalctl -u maxine-webcam -f"
+echo ""
+echo "  Select 'MaxineEyeContact' in Zoom, Teams, OBS, Chrome, etc."
 echo "============================================"
