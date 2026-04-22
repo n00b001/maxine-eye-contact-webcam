@@ -11,6 +11,7 @@ TAG="${1:-latest}"
 IMAGE="$REGISTRY/arsdk-base:$TAG"
 
 info() { echo "[INFO] $*"; }
+error() { echo "[ERROR] $*" >&2; }
 
 # ---------------------------------------------------------------------------
 # Verify ARSDK is present
@@ -18,19 +19,33 @@ info() { echo "[INFO] $*"; }
 if [ ! -d "arsdk/lib" ]; then
     if [ -d "/usr/local/ARSDK/lib" ]; then
         info "Copying ARSDK from /usr/local/ARSDK into build context..."
-        cp -rL /usr/local/ARSDK arsdk
+        rm -rf arsdk
+        mkdir -p arsdk
+        cp -rL /usr/local/ARSDK/include  arsdk/
+        cp -rL /usr/local/ARSDK/lib      arsdk/
+        cp -rL /usr/local/ARSDK/features arsdk/
+        cp -rL /usr/local/ARSDK/share    arsdk/
     else
-        echo "ERROR: ARSDK not found at /usr/local/ARSDK or docker/arsdk/"
+        error "ARSDK not found at /usr/local/ARSDK or docker/arsdk/"
         exit 1
     fi
 fi
 
 # ---------------------------------------------------------------------------
-# Log in to GHCR (uses GitHub Personal Access Token with write:packages)
+# Verify GHCR write access
 # ---------------------------------------------------------------------------
-if ! docker info 2>/dev/null | grep -q "Registry: https://index.docker.io/v1/"; then
-    info "Ensure you are logged in to GHCR:"
-    info "  echo \$GITHUB_TOKEN | docker login ghcr.io -u n00b001 --password-stdin"
+info "Checking GHCR login & write access..."
+if ! docker info 2>/dev/null | grep -q "Registry"; then
+    error "Docker daemon is not running or not accessible"
+    exit 1
+fi
+
+# Attempt a small test push to verify permissions
+if ! docker push "$IMAGE" 2>&1 | head -1 | grep -q "The push refers to repository"; then
+    # Image doesn't exist locally yet; we'll build first. But let's check login.
+    if ! docker pull "ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-base:__test__" 2>&1 | grep -q "unauthorized\|denied"; then
+        : # logged in ok
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -40,6 +55,20 @@ info "Building $IMAGE ..."
 docker build -f Dockerfile.base -t "$IMAGE" .
 
 info "Pushing $IMAGE ..."
-docker push "$IMAGE"
+if ! docker push "$IMAGE"; then
+    error "Push failed. This usually means your GitHub token lacks 'write:packages' scope."
+    error ""
+    error "Fix options:"
+    error "  1. Interactive (easiest):"
+    error "       gh auth login --scopes repo,write:packages,read:packages"
+    error ""
+    error "  2. Classic PAT:"
+    error "       - Go to https://github.com/settings/tokens/new"
+    error "       - Select scopes: write:packages, read:packages, repo"
+    error "       - Generate token, then:"
+    error "       echo ghp_YOUR_TOKEN | docker login ghcr.io -u n00b001 --password-stdin"
+    error ""
+    exit 1
+fi
 
 info "Done. GitHub Actions can now build on ubuntu-latest using this base."

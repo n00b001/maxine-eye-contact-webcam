@@ -14,6 +14,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}/arsdk-gaze
+  BASE_IMAGE: ghcr.io/${{ github.repository }}/arsdk-base:latest
 
 jobs:
   build-and-push:
@@ -27,6 +28,23 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Verify base image exists
+        run: |
+          if ! docker manifest inspect "${BASE_IMAGE}" > /dev/null 2>&1; then
+            echo ""
+            echo "❌ Base image not found: ${BASE_IMAGE}"
+            echo ""
+            echo "The NVIDIA ARSDK is proprietary and cannot be committed to this public repo."
+            echo "You must build and push the base image once from a machine with ARSDK:"
+            echo ""
+            echo "  ./scripts/push-arsdk-base.sh latest"
+            echo ""
+            echo "See README.md → 'GitHub Actions CI / GHCR Publishing' for details."
+            echo ""
+            exit 1
+          fi
+          echo "✅ Base image found: ${BASE_IMAGE}"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -60,7 +78,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
-            ARSDK_BASE=${{ env.REGISTRY }}/${{ github.repository }}/arsdk-base:latest
+            ARSDK_BASE=${{ env.BASE_IMAGE }}
 
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@v1

@@ -1,5 +1,8 @@
 # syntax=docker/dockerfile:1
-# Proprietary NVIDIA ARSDK base image.
+# Proprietary NVIDIA ARSDK base image (slim — excludes external CUDA/TensorRT
+# libraries which are provided by the nvidia/cuda runtime base image or mounted
+# by nvidia-container-toolkit at runtime).
+#
 # This MUST be built and pushed manually from a machine that has the ARSDK
 # installed at /usr/local/ARSDK.  The resulting image is pushed to GHCR
 # (private or public) and consumed by the GitHub Actions workflow.
@@ -10,4 +13,11 @@
 #   docker push ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-base:latest
 
 FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
-COPY arsdk /usr/local/ARSDK
+
+# Copy only the ARSDK files we actually need.
+# external/ is excluded because CUDA/TensorRT runtime libs are already in the
+# base image or injected by the NVIDIA Container Toolkit at runtime.
+COPY arsdk/include     /usr/local/ARSDK/include
+COPY arsdk/lib         /usr/local/ARSDK/lib
+COPY arsdk/features    /usr/local/ARSDK/features
+COPY arsdk/share       /usr/local/ARSDK/share
