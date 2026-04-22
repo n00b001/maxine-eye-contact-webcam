@@ -134,12 +134,13 @@ ok "Image pulled: $GHCR_IMAGE"
 # ---------------------------------------------------------------------------
 info "Installing systemd service..."
 
-# Ensure the service file references the GHCR image (idempotent)
-if grep -q "arsdk-gaze:latest" "$SCRIPT_DIR/$SERVICE_NAME"; then
-    sed -i "s|arsdk-gaze:latest|$GHCR_IMAGE|g" "$SCRIPT_DIR/$SERVICE_NAME"
-fi
-
-sudo cp "$SCRIPT_DIR/$SERVICE_NAME" /etc/systemd/system/
+# Copy service file to systemd, replacing local tag with GHCR image path.
+# We copy to a temp file first so the repo file is never modified.
+TMP_SERVICE="/tmp/$SERVICE_NAME"
+cp "$SCRIPT_DIR/$SERVICE_NAME" "$TMP_SERVICE"
+sed -i "s|arsdk-gaze:latest|$GHCR_IMAGE|g" "$TMP_SERVICE"
+sudo cp "$TMP_SERVICE" /etc/systemd/system/
+rm -f "$TMP_SERVICE"
 sudo systemctl daemon-reload
 sudo systemctl enable "$SERVICE_NAME"
 ok "Service installed: $SERVICE_NAME"
