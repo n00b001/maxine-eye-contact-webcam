@@ -1,7 +1,5 @@
 # syntax=docker/dockerfile:1
-# Proprietary NVIDIA ARSDK base image (slim — excludes external CUDA/TensorRT
-# libraries which are provided by the nvidia/cuda runtime base image or mounted
-# by nvidia-container-toolkit at runtime).
+# Proprietary NVIDIA ARSDK base image.
 #
 # This MUST be built and pushed manually from a machine that has the ARSDK
 # installed at /usr/local/ARSDK.  The resulting image is pushed to GHCR
@@ -14,10 +12,9 @@
 
 FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
 
-# Copy only the ARSDK files we actually need.
-# external/ is excluded because CUDA/TensorRT runtime libs are already in the
-# base image or injected by the NVIDIA Container Toolkit at runtime.
-COPY arsdk/include     /usr/local/ARSDK/include
-COPY arsdk/lib         /usr/local/ARSDK/lib
-COPY arsdk/features    /usr/local/ARSDK/features
-COPY arsdk/share       /usr/local/ARSDK/share
+# Copy the full ARSDK tree including external CUDA/TensorRT libraries.
+# The external libs are required for the binary to run on hosts that do
+# not have NVIDIA Container Toolkit injecting them at runtime.
+COPY arsdk /usr/local/ARSDK
+
+ENV NVAR_MODEL_DIR=/usr/local/ARSDK/lib/models
