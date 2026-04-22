@@ -41,7 +41,8 @@ jobs:
 
       - name: Verify base image exists
         run: |
-          if ! docker manifest inspect "${BASE_IMAGE}" > /dev/null 2>&1; then
+          echo "Checking base image: ${BASE_IMAGE}"
+          if ! docker buildx imagetools inspect "${BASE_IMAGE}" > /dev/null 2>&1; then
             echo ""
             echo "❌ Base image not found or not accessible: ${BASE_IMAGE}"
             echo ""
