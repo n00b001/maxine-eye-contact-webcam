@@ -108,19 +108,19 @@ The gaze redirection behavior can be customized via **environment variables** (p
 
 | Variable | Default | Range | Description |
 |----------|---------|-------|-------------|
-| `GAZE_EYE_SIZE` | `3` | `2`–`5` | Eye region size for redirection. Larger = bigger eye area modified. |
-| `GAZE_LANDMARKS` | `68` | `68`, `126` | Number of facial landmarks tracked. |
+| `GAZE_EYE_SIZE` | `2` | `2`–`5` | Eye region size for redirection. Larger = bigger eye area modified. |
+| `GAZE_LANDMARKS` | `126` | `68`, `126` | Number of facial landmarks tracked. |
 | `GAZE_NO_REDIRECT` | `0` | `0`/`1` | Set to `1` to disable gaze redirection (estimation only). |
 | `GAZE_NO_STABILIZE` | `0` | `0`/`1` | Set to `1` to disable temporal face stabilization. |
 | `GAZE_NO_CUDA_GRAPH` | `0` | `0`/`1` | Set to `1` to disable CUDA Graph optimization. |
-| `GAZE_PITCH_LOW` | `20.0` | `10.0`–`35.0` | Lower pitch threshold (°). Inside this angle, gaze is fully redirected to camera. |
-| `GAZE_PITCH_HIGH` | `30.0` | `10.0`–`35.0` | Upper pitch threshold (°). Beyond this, no redirection occurs. |
-| `GAZE_YAW_LOW` | `20.0` | `10.0`–`35.0` | Lower yaw threshold (°). Same behavior as pitch but for yaw. |
-| `GAZE_YAW_HIGH` | `30.0` | `10.0`–`35.0` | Upper yaw threshold (°). |
-| `GAZE_HEAD_PITCH_LOW` | `15.0` | `10.0`–`35.0` | Lower head-pose pitch threshold (°). |
-| `GAZE_HEAD_PITCH_HIGH` | `25.0` | `10.0`–`35.0` | Upper head-pose pitch threshold (°). |
-| `GAZE_HEAD_YAW_LOW` | `25.0` | `10.0`–`35.0` | Lower head-pose yaw threshold (°). |
-| `GAZE_HEAD_YAW_HIGH` | `30.0` | `10.0`–`35.0` | Upper head-pose yaw threshold (°). |
+| `GAZE_PITCH_LOW` | `10.0` | `10.0`–`35.0` | Lower pitch threshold (°). Inside this angle, gaze is fully redirected to camera. |
+| `GAZE_PITCH_HIGH` | `35.0` | `10.0`–`35.0` | Upper pitch threshold (°). Beyond this, no redirection occurs. |
+| `GAZE_YAW_LOW` | `10.0` | `10.0`–`35.0` | Lower yaw threshold (°). Same behavior as pitch but for yaw. |
+| `GAZE_YAW_HIGH` | `35.0` | `10.0`–`35.0` | Upper yaw threshold (°). |
+| `GAZE_HEAD_PITCH_LOW` | `10.0` | `10.0`–`35.0` | Lower head-pose pitch threshold (°). |
+| `GAZE_HEAD_PITCH_HIGH` | `35.0` | `10.0`–`35.0` | Upper head-pose pitch threshold (°). |
+| `GAZE_HEAD_YAW_LOW` | `10.0` | `10.0`–`35.0` | Lower head-pose yaw threshold (°). |
+| `GAZE_HEAD_YAW_HIGH` | `35.0` | `10.0`–`35.0` | Upper head-pose yaw threshold (°). |
 
 **How thresholds work:** Between `*Low` and `*High`, the redirected gaze linearly transitions from full camera-facing to estimated natural gaze. Above the high threshold, no redirection is applied.
 

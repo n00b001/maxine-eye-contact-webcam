@@ -13,19 +13,19 @@ StandardError=journal
 SyslogIdentifier=maxine-ar-sdk-webcam
 
 # Gaze redirection tuning (see README for descriptions)
-Environment="GAZE_EYE_SIZE=3"
-Environment="GAZE_LANDMARKS=68"
+Environment="GAZE_EYE_SIZE=2"
+Environment="GAZE_LANDMARKS=126"
 # Environment="GAZE_NO_REDIRECT=0"
 # Environment="GAZE_NO_STABILIZE=0"
 # Environment="GAZE_NO_CUDA_GRAPH=0"
-# Environment="GAZE_PITCH_LOW=20.0"
-# Environment="GAZE_PITCH_HIGH=30.0"
-# Environment="GAZE_YAW_LOW=20.0"
-# Environment="GAZE_YAW_HIGH=30.0"
-# Environment="GAZE_HEAD_PITCH_LOW=15.0"
-# Environment="GAZE_HEAD_PITCH_HIGH=25.0"
-# Environment="GAZE_HEAD_YAW_LOW=25.0"
-# Environment="GAZE_HEAD_YAW_HIGH=30.0"
+# Environment="GAZE_PITCH_LOW=10.0"
+# Environment="GAZE_PITCH_HIGH=35.0"
+# Environment="GAZE_YAW_LOW=10.0"
+# Environment="GAZE_YAW_HIGH=35.0"
+# Environment="GAZE_HEAD_PITCH_LOW=10.0"
+# Environment="GAZE_HEAD_PITCH_HIGH=35.0"
+# Environment="GAZE_HEAD_YAW_LOW=10.0"
+# Environment="GAZE_HEAD_YAW_HIGH=35.0"
 
 # Pull latest image and run
 ExecStartPre=-/usr/bin/docker pull ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest
