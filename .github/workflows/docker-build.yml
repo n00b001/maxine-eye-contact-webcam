@@ -29,23 +29,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify base image exists
-        run: |
-          if ! docker manifest inspect "${BASE_IMAGE}" > /dev/null 2>&1; then
-            echo ""
-            echo "❌ Base image not found: ${BASE_IMAGE}"
-            echo ""
-            echo "The NVIDIA ARSDK is proprietary and cannot be committed to this public repo."
-            echo "You must build and push the base image once from a machine with ARSDK:"
-            echo ""
-            echo "  ./scripts/push-arsdk-base.sh latest"
-            echo ""
-            echo "See README.md → 'GitHub Actions CI / GHCR Publishing' for details."
-            echo ""
-            exit 1
-          fi
-          echo "✅ Base image found: ${BASE_IMAGE}"
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -54,7 +37,25 @@ jobs:
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Verify base image exists
+        run: |
+          if ! docker manifest inspect "${BASE_IMAGE}" > /dev/null 2>&1; then
+            echo ""
+            echo "❌ Base image not found or not accessible: ${BASE_IMAGE}"
+            echo ""
+            echo "The NVIDIA ARSDK is proprietary and cannot be committed to this public repo."
+            echo "You must build and push the base image once from a machine with ARSDK:"
+            echo ""
+            echo "  ./scripts/push-arsdk-base.sh latest"
+            echo ""
+            echo "If the image exists but is private, add a GHCR_PAT secret with 'read:packages' scope."
+            echo "See README.md → 'GitHub Actions CI / GHCR Publishing' for details."
+            echo ""
+            exit 1
+          fi
+          echo "✅ Base image found: ${BASE_IMAGE}"
 
       - name: Extract metadata
         id: meta

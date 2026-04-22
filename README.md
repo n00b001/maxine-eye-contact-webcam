@@ -124,6 +124,22 @@ ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest
 
 No self-hosted runner required — it runs on `ubuntu-latest`.
 
+> **⚠️ Private base image access**
+>
+> GHCR packages pushed from a personal account default to **private**. The
+> GitHub Actions `GITHUB_TOKEN` cannot access private user-scoped packages.
+>
+> **Option 1 (recommended):** Make the base image public:
+> 1. Visit `https://github.com/users/n00b001/packages/container/package/maxine-eye-contact-webcam%2Farsdk-base/settings`
+> 2. Under "Danger Zone", click "Change visibility" → "Make public"
+>
+> **Option 2:** Use a Personal Access Token (PAT):
+> 1. Create a classic PAT with `read:packages` scope at
+>    `https://github.com/settings/tokens`
+> 2. Add it as a repository secret named `GHCR_PAT` at
+>    `https://github.com/n00b001/maxine-eye-contact-webcam/settings/secrets/actions`
+> 3. The workflow will automatically use `GHCR_PAT` for GHCR login.
+
 ### Systemd Service (Auto-start)
 
 ```bash
