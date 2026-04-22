@@ -39,15 +39,15 @@ static int set_v4l2_format(int fd, int width, int height, uint32_t pixelformat) 
 
 static float env_or_default_f(const char* name, float def) {
     const char* v = getenv(name);
-    return v ? (float)atof(v) : def;
+    return (v && v[0] != '\0') ? (float)atof(v) : def;
 }
 static int env_or_default_i(const char* name, int def) {
     const char* v = getenv(name);
-    return v ? atoi(v) : def;
+    return (v && v[0] != '\0') ? atoi(v) : def;
 }
 static bool env_enabled(const char* name) {
     const char* v = getenv(name);
-    return v && (strcmp(v, "1") == 0 || strcmp(v, "true") == 0 || strcmp(v, "yes") == 0);
+    return v && v[0] != '\0' && (strcmp(v, "1") == 0 || strcmp(v, "true") == 0 || strcmp(v, "yes") == 0);
 }
 
 int main(int argc, char** argv) {
