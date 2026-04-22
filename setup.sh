@@ -21,15 +21,26 @@ fail()  { echo "  ✗ $*"; exit 1; }
 # 1. System dependencies
 # ---------------------------------------------------------------------------
 info "Installing system dependencies..."
+
+# Fix any half-configured/broken packages from previous runs first
+sudo dpkg --configure -a 2>/dev/null || true
+sudo apt-get install -f -y -qq 2>/dev/null || true
+
 sudo apt-get update -qq
-sudo apt-get install -y -qq \
-    ffmpeg \
-    v4l2loopback-dkms \
-    v4l2loopback-utils \
-    v4l-utils \
-    curl \
-    linux-headers-$(uname -r) \
-    || fail "Failed to install system dependencies"
+
+# Install packages individually so a v4l2loopback-dkms downgrade conflict
+# doesn't abort the whole script (module may already be present).
+sudo apt-get install -y -qq ffmpeg v4l-utils curl linux-headers-$(uname -r) \
+    || warn "Some base packages failed to install"
+
+# v4l2loopback-dkms may fail if a newer version is already installed.
+# Check if the module is already available before trying to install.
+if lsmod | grep -q "^v4l2loopback" || modinfo v4l2loopback &>/dev/null; then
+    ok "v4l2loopback module already present — skipping v4l2loopback-dkms install"
+else
+    sudo apt-get install -y -qq v4l2loopback-dkms v4l2loopback-utils \
+        || warn "v4l2loopback-dkms install failed — module may need manual install"
+fi
 ok "System dependencies installed"
 
 # ---------------------------------------------------------------------------
@@ -123,8 +134,10 @@ ok "Image pulled: $GHCR_IMAGE"
 # ---------------------------------------------------------------------------
 info "Installing systemd service..."
 
-# Update the service file in-place to use the GHCR image
-sed -i "s|arsdk-gaze:latest|$GHCR_IMAGE|g" "$SCRIPT_DIR/$SERVICE_NAME"
+# Ensure the service file references the GHCR image (idempotent)
+if grep -q "arsdk-gaze:latest" "$SCRIPT_DIR/$SERVICE_NAME"; then
+    sed -i "s|arsdk-gaze:latest|$GHCR_IMAGE|g" "$SCRIPT_DIR/$SERVICE_NAME"
+fi
 
 sudo cp "$SCRIPT_DIR/$SERVICE_NAME" /etc/systemd/system/
 sudo systemctl daemon-reload
