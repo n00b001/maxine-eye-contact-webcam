@@ -17,9 +17,7 @@ env:
 
 jobs:
   build-and-push:
-    # This MUST run on a self-hosted runner that has the NVIDIA ARSDK
-    # installed at /usr/local/ARSDK (proprietary, cannot be committed).
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -29,15 +27,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Copy ARSDK into build context
-        run: |
-          if [ ! -d "/usr/local/ARSDK" ]; then
-            echo "ERROR: /usr/local/ARSDK not found on self-hosted runner"
-            exit 1
-          fi
-          cp -rL /usr/local/ARSDK docker/arsdk
-          echo "ARSDK copied: $(du -sh docker/arsdk | cut -f1)"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -70,6 +59,8 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            ARSDK_BASE=${{ env.REGISTRY }}/${{ github.repository }}/arsdk-base:latest
 
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@v1

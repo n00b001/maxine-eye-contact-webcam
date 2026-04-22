@@ -59,7 +59,14 @@ If you prefer to build yourself (or the GHCR image is not yet published):
 
 ```bash
 cd docker/
-# ARSDK is copied from /usr/local/ARSDK (proprietary, not in repo)
+
+# One-time: copy ARSDK into build context
+cp -rL /usr/local/ARSDK arsdk
+
+# Build the base image (proprietary layer)
+docker build -f Dockerfile.base -t ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-base:latest .
+
+# Build the app image
 docker build -t arsdk-gaze:latest .
 ```
 
@@ -80,36 +87,42 @@ See `docker-compose.yml` (single node) or `docker-stack.yml` (Docker Swarm).
 ### GitHub Actions CI / GHCR Publishing
 
 The repo includes `.github/workflows/docker-build.yml` which builds the image
-and pushes it to GitHub Container Registry (GHCR).
+on **GitHub-hosted runners** (`ubuntu-latest`) and pushes it to GitHub Container
+Registry (GHCR).
 
-**Important:** The NVIDIA AR SDK is proprietary and cannot be committed to a
-public repository. Therefore the workflow **must run on a self-hosted runner**
-that already has ARSDK installed at `/usr/local/ARSDK`.
+Because the NVIDIA ARSDK is proprietary and cannot be committed to a public
+repository, the build is split into two images:
 
-#### Set up the self-hosted runner (one-time)
+1. **`arsdk-base`** — contains only the proprietary ARSDK binaries. Built
+   **once locally** on a machine with `/usr/local/ARSDK` and pushed to GHCR.
+2. **`arsdk-gaze`** — the application image. Built automatically by GitHub
+   Actions on every push to `main`, pulling `arsdk-base` from GHCR.
 
-On the host machine with ARSDK:
+#### One-time: build & push the ARSDK base image
+
+On the machine that has ARSDK installed:
 
 ```bash
-# 1. Create a GitHub runner directory
-mkdir -p ~/actions-runner && cd ~/actions-runner
+# Log in to GHCR (token needs write:packages scope)
+echo $GITHUB_TOKEN | docker login ghcr.io -u n00b001 --password-stdin
 
-# 2. Download the latest runner (check GitHub docs for current version)
-curl -o actions-runner-linux-x64-2.320.0.tar.gz -L \
-  https://github.com/actions/runner/releases/download/v2.320.0/actions-runner-linux-x64-2.320.0.tar.gz
-tar xzf actions-runner-linux-x64-2.320.0.tar.gz
-
-# 3. Configure (get token from GitHub repo Settings > Actions > Runners)
-./config.sh --url https://github.com/n00b001/maxine-eye-contact-webcam --token <RUNNER_TOKEN>
-
-# 4. Install and start as a service
-./svc.sh install
-./svc.sh start
+# Build and push the base image
+./scripts/push-arsdk-base.sh latest
 ```
 
-Once the runner is online, the workflow will trigger automatically on every
-push to `main` (and version tags). You can also trigger it manually via the
-**Actions** tab.
+This copies `/usr/local/ARSDK` into `docker/arsdk/`, builds
+`ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-base:latest`, and pushes it.
+
+#### Automatic app builds (GitHub Actions)
+
+Once the base image is on GHCR, the workflow in `.github/workflows/docker-build.yml`
+will build and publish the app image on every push to `main` or version tag:
+
+```
+ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest
+```
+
+No self-hosted runner required — it runs on `ubuntu-latest`.
 
 ### Systemd Service (Auto-start)
 

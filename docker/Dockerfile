@@ -1,4 +1,26 @@
 # syntax=docker/dockerfile:1
+# Multi-stage build:
+#   Stage 1 (arsdk-base) – proprietary NVIDIA ARSDK, built locally once and
+#   pushed to GHCR.  The public repo never contains the ARSDK binaries.
+#   Stage 2 – application code, built on GitHub-hosted runners.
+#
+# Build the base (one-time, on a machine with /usr/local/ARSDK):
+#   docker build -f Dockerfile.base -t ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-base:latest .
+#   docker push ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-base:latest
+#
+# Build the app (GitHub Actions or locally):
+#   docker build -t arsdk-gaze:latest .
+
+ARG ARSDK_BASE=ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-base:latest
+
+# ---------------------------------------------------------------------------
+# Stage 1: Import ARSDK from the pre-published base image
+# ---------------------------------------------------------------------------
+FROM ${ARSDK_BASE} AS arsdk
+
+# ---------------------------------------------------------------------------
+# Stage 2: Application build (GitHub-hosted runners can do this)
+# ---------------------------------------------------------------------------
 FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -13,8 +35,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     v4l-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy ARSDK (hard-linked from host, so it's a full copy in the build context)
-COPY arsdk /usr/local/ARSDK
+# Copy ARSDK from the base image (proprietary layer)
+COPY --from=arsdk /usr/local/ARSDK /usr/local/ARSDK
 
 # Copy application sources
 COPY src /app/src
@@ -40,8 +62,7 @@ RUN clang++ -fpermissive -O2 -std=c++17 \
     $(pkg-config --libs opencv4) \
     -pthread
 
-# Runtime library path: ONLY main lib + CUDA/TensorRT externals.
-# Do NOT add .../features/*/lib subdirectories.
+# Runtime library path: main lib + CUDA/TensorRT externals + feature libs.
 ENV LD_LIBRARY_PATH="/usr/local/ARSDK/lib:/usr/local/ARSDK/external/cuda/lib:/usr/local/ARSDK/external/tensorrt/lib:/usr/local/ARSDK/features/nvargazeredirection/lib:/usr/local/ARSDK/features/nvarlandmarkdetection/lib:/usr/local/ARSDK/features/nvarfaceboxdetection/lib"
 ENV NVAR_MODEL_DIR=/usr/local/ARSDK/lib/models
 
