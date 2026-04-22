@@ -124,22 +124,22 @@ int main(int argc, char** argv) {
     engine.setFaceStabilization(!env_enabled("GAZE_NO_STABILIZE"));
     engine.setUseCudaGraph(!env_enabled("GAZE_NO_CUDA_GRAPH"));
 
-    int landmarks = env_or_default_i("GAZE_LANDMARKS", 68);
+    int landmarks = env_or_default_i("GAZE_LANDMARKS", 126);
     if (engine.setNumLandmarks(landmarks) != GazeEngine::errNone) {
         fprintf(stderr, "Warning: unsupported landmarks count %d, using 68\n", landmarks);
         engine.setNumLandmarks(68);
     }
 
-    engine.setEyeSizeSensitivity((unsigned)env_or_default_i("GAZE_EYE_SIZE", 3));
+    engine.setEyeSizeSensitivity((unsigned)env_or_default_i("GAZE_EYE_SIZE", 2));
 
-    engine.setGazePitchThresholdLow(env_or_default_f("GAZE_PITCH_LOW", 20.0f));
-    engine.setGazePitchThresholdHigh(env_or_default_f("GAZE_PITCH_HIGH", 30.0f));
-    engine.setGazeYawThresholdLow(env_or_default_f("GAZE_YAW_LOW", 20.0f));
-    engine.setGazeYawThresholdHigh(env_or_default_f("GAZE_YAW_HIGH", 30.0f));
-    engine.setHeadPitchThresholdLow(env_or_default_f("GAZE_HEAD_PITCH_LOW", 15.0f));
-    engine.setHeadPitchThresholdHigh(env_or_default_f("GAZE_HEAD_PITCH_HIGH", 25.0f));
-    engine.setHeadYawThresholdLow(env_or_default_f("GAZE_HEAD_YAW_LOW", 25.0f));
-    engine.setHeadYawThresholdHigh(env_or_default_f("GAZE_HEAD_YAW_HIGH", 30.0f));
+    engine.setGazePitchThresholdLow(env_or_default_f("GAZE_PITCH_LOW", 10.0f));
+    engine.setGazePitchThresholdHigh(env_or_default_f("GAZE_PITCH_HIGH", 35.0f));
+    engine.setGazeYawThresholdLow(env_or_default_f("GAZE_YAW_LOW", 10.0f));
+    engine.setGazeYawThresholdHigh(env_or_default_f("GAZE_YAW_HIGH", 35.0f));
+    engine.setHeadPitchThresholdLow(env_or_default_f("GAZE_HEAD_PITCH_LOW", 10.0f));
+    engine.setHeadPitchThresholdHigh(env_or_default_f("GAZE_HEAD_PITCH_HIGH", 35.0f));
+    engine.setHeadYawThresholdLow(env_or_default_f("GAZE_HEAD_YAW_LOW", 10.0f));
+    engine.setHeadYawThresholdHigh(env_or_default_f("GAZE_HEAD_YAW_HIGH", 35.0f));
 
     GazeEngine::Err err = engine.createGazeRedirectionFeature(modelPath);
     if (err != GazeEngine::errNone) {
