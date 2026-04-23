@@ -1,15 +1,46 @@
 [Unit]
-Description=Maxine Eye Contact Webcam Pipeline
+Description=Maxine Eye Contact + Head Pose Correction Webcam Pipeline
 After=network-online.target docker.service
 Wants=network-online.target docker.service
 
 [Service]
 Type=simple
 User=%I
+WorkingDirectory=/opt/maxine-eye-contact-webcam
+
+# --- NGC / NIM auth -------------------------------------------------------
 Environment="NGC_API_KEY_FILE=/etc/nvidia-nim/api.key"
 Environment="PYTHONUNBUFFERED=1"
-WorkingDirectory=/opt/maxine-eye-contact-webcam
-ExecStart=/usr/bin/env bash -c 'export PATH="$HOME/.local/bin:$PATH" && cd /opt/maxine-eye-contact-webcam && uv run python maxine_webcam_pipeline.py --nim 127.0.0.1:8003 --input /dev/video0 --output /dev/video10 --resolution 720p --fps 30'
+
+# --- Eye contact (NIM) tuning --------------------------------------------
+# Edit via `sudo systemctl edit maxine-webcam --full`, then
+# `sudo systemctl restart maxine-webcam`. See README for descriptions.
+Environment="NIM_TARGET=127.0.0.1:8003"
+Environment="RESOLUTION=720p"
+Environment="FPS=30"
+Environment="GOP=30"
+Environment="EYE_SIZE=4"
+Environment="TEMPORAL=0xFFFFFFFF"
+Environment="DETECT_CLOSURE=0"
+Environment="BITRATE=8M"
+Environment="NVENC=0"
+
+# --- Head pose correction --------------------------------------------------
+# HEAD_POSE=1 enables the MediaPipe + affine-warp post-processor that runs
+# after the NIM gaze redirection. Requires `mediapipe` in the venv (see
+# README "Head Pose Correction" for the install command).
+Environment="HEAD_POSE=1"
+Environment="HEAD_POSE_STRENGTH=1.0"
+Environment="HEAD_POSE_YAW_LIMIT=45.0"
+
+# --- Device paths ---------------------------------------------------------
+Environment="INPUT_DEVICE=/dev/video0"
+Environment="OUTPUT_DEVICE=/dev/video10"
+
+ExecStart=/usr/bin/env bash -c 'export PATH="$HOME/.local/bin:$PATH" && \
+    cd /opt/maxine-eye-contact-webcam && \
+    uv run python maxine_webcam_pipeline.py'
+
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

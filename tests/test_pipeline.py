@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from unittest.mock import MagicMock, patch
 
@@ -42,6 +43,56 @@ class TestParserHeadPoseFlags:
         assert args.head_pose is False
         assert args.head_pose_strength == pytest.approx(1.0)
         assert args.head_pose_yaw_limit == pytest.approx(45.0)
+
+
+class TestEnvVarDefaults:
+    """Tests that env vars drive argparse defaults (systemd unit support)."""
+
+    def test_head_pose_env_var_true(self):
+        """HEAD_POSE=1 enables head-pose without a CLI flag."""
+        with patch.dict(os.environ, {"HEAD_POSE": "1"}, clear=False):
+            args = pipeline.build_parser().parse_args([])
+            assert args.head_pose is True
+
+    def test_head_pose_env_var_false(self):
+        """Unset HEAD_POSE defaults to disabled."""
+        env = {k: v for k, v in os.environ.items() if k != "HEAD_POSE"}
+        with patch.dict(os.environ, env, clear=True):
+            args = pipeline.build_parser().parse_args([])
+            assert args.head_pose is False
+
+    def test_head_pose_strength_env(self):
+        """HEAD_POSE_STRENGTH env var becomes the default."""
+        with patch.dict(os.environ, {"HEAD_POSE_STRENGTH": "0.4"}, clear=False):
+            args = pipeline.build_parser().parse_args([])
+            assert args.head_pose_strength == pytest.approx(0.4)
+
+    def test_head_pose_yaw_limit_env(self):
+        """HEAD_POSE_YAW_LIMIT env var becomes the default."""
+        with patch.dict(os.environ, {"HEAD_POSE_YAW_LIMIT": "60"}, clear=False):
+            args = pipeline.build_parser().parse_args([])
+            assert args.head_pose_yaw_limit == pytest.approx(60.0)
+
+    def test_eye_size_env(self):
+        """EYE_SIZE env var becomes the default for --eye-size."""
+        with patch.dict(os.environ, {"EYE_SIZE": "6"}, clear=False):
+            args = pipeline.build_parser().parse_args([])
+            assert args.eye_size == 6
+
+    def test_cli_overrides_env(self):
+        """Explicit CLI args always override env var defaults."""
+        with patch.dict(os.environ, {"HEAD_POSE": "0", "HEAD_POSE_STRENGTH": "0.3"}):
+            args = pipeline.build_parser().parse_args(
+                ["--head-pose", "--head-pose-strength", "0.9"]
+            )
+            assert args.head_pose is True
+            assert args.head_pose_strength == pytest.approx(0.9)
+
+    def test_no_head_pose_flag_disables(self):
+        """--no-head-pose disables head-pose even when HEAD_POSE=1."""
+        with patch.dict(os.environ, {"HEAD_POSE": "1"}):
+            args = pipeline.build_parser().parse_args(["--no-head-pose"])
+            assert args.head_pose is False
 
 
 class TestPipelineWithoutHeadPose:

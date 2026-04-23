@@ -406,17 +406,64 @@ Select **"MaxineEyeContact"** as your camera in Zoom, Teams, OBS, Chrome, etc.
 
 ### Systemd Auto-Start (Python NIM)
 
+The Python NIM pipeline ships as a systemd unit that runs **eye-contact
+correction (via NIM) and head-pose correction (via MediaPipe) together** by
+default. All tuning knobs are exposed as `Environment=` entries in the
+unit — edit them the same way you edit the AR SDK pipeline's `GAZE_*`
+variables.
+
 ```bash
 sudo mkdir -p /opt/maxine-eye-contact-webcam
 sudo cp -r . /opt/maxine-eye-contact-webcam/
 sudo cp maxine-webcam.service /etc/systemd/system/
+
+# Head-pose requires mediapipe in the venv (see "Head Pose Correction"
+# above — mediapipe pins protobuf<5 so it lives outside the uv lockfile).
+cd /opt/maxine-eye-contact-webcam
+uv sync
+uv pip install 'mediapipe>=0.10,<0.10.20'
+
 sudo systemctl daemon-reload
-sudo systemctl enable maxine-webcam.service
-sudo systemctl start maxine-webcam.service
+sudo systemctl enable --now maxine-webcam.service
 sudo journalctl -u maxine-webcam -f
 ```
 
-The service uses `uv run` so the environment stays in sync automatically.
+#### Tunable environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `NIM_TARGET` | `127.0.0.1:8003` | gRPC address of the Maxine Eye Contact NIM |
+| `RESOLUTION` | `720p` | `480p` / `720p` / `1080p` |
+| `FPS` | `30` | Target frame rate |
+| `GOP` | `30` | Frames per NIM request |
+| `EYE_SIZE` | `4` | NIM `eye_size_sensitivity` (2–6) |
+| `TEMPORAL` | `0xFFFFFFFF` | NIM temporal smoothing bitmask |
+| `DETECT_CLOSURE` | `0` | NIM `detect_closure` flag |
+| `BITRATE` | `8M` | Video bitrate fed to the NIM |
+| `NVENC` | `0` | Set `1` to use NVENC instead of libx264 |
+| `HEAD_POSE` | `1` | Set `0` to disable head-pose correction |
+| `HEAD_POSE_STRENGTH` | `1.0` | 0.0 = identity, 1.0 = full geometric correction |
+| `HEAD_POSE_YAW_LIMIT` | `45.0` | Skip correction when `|yaw|` exceeds this (°) |
+| `INPUT_DEVICE` | `/dev/video0` | Physical webcam |
+| `OUTPUT_DEVICE` | `/dev/video10` | v4l2loopback sink |
+
+**To change values:**
+
+```bash
+sudo systemctl edit maxine-webcam --full
+# edit Environment= lines, save, then:
+sudo systemctl daemon-reload
+sudo systemctl restart maxine-webcam
+```
+
+One-off override without editing the unit (the CLI always wins):
+
+```bash
+uv run python maxine_webcam_pipeline.py --head-pose-strength 0.5 --eye-size 6
+```
+
+The service uses `uv run` so the Python interpreter and deps stay in sync
+with the working tree.
 
 ---
 

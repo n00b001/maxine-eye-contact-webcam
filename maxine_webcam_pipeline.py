@@ -600,52 +600,114 @@ def output_thread(
 
 
 # ---------------------------------------------------------------------------
-# CLI
+# CLI — env-var-driven defaults so the systemd unit can tune via Environment=
 # ---------------------------------------------------------------------------
 
 
+_TRUTHY = {"1", "true", "yes", "on", "y"}
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in _TRUTHY
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int, *, base: int = 0) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw, base)
+    except ValueError:
+        return default
+
+
+def _env_str(name: str, default: str) -> str:
+    raw = os.environ.get(name)
+    return raw if raw not in (None, "") else default
+
+
 def build_parser() -> argparse.ArgumentParser:
+    # Every default here falls through to an env var first so the systemd
+    # unit can tune behaviour via Environment= lines (the GAZE_* pattern
+    # used by the native AR SDK service). CLI args always win when
+    # explicitly provided.
     p = argparse.ArgumentParser(description="Real-time Maxine Eye Contact via NIM + v4l2loopback")
     p.add_argument(
-        "--input", default="/dev/video0", help="V4L2 webcam device (default: /dev/video0)"
+        "--input",
+        default=_env_str("INPUT_DEVICE", "/dev/video0"),
+        help="V4L2 webcam device (env: INPUT_DEVICE, default: /dev/video0)",
     )
     p.add_argument(
         "--output",
-        default="/dev/video10",
-        help="v4l2loopback output device (default: /dev/video10)",
+        default=_env_str("OUTPUT_DEVICE", "/dev/video10"),
+        help="v4l2loopback output device (env: OUTPUT_DEVICE, default: /dev/video10)",
     )
     p.add_argument(
         "--resolution",
-        default="720p",
+        default=_env_str("RESOLUTION", "720p"),
         choices=["480p", "720p", "1080p"],
-        help="Preset resolution: 480p, 720p, 1080p (default: 720p)",
+        help="Preset resolution: 480p, 720p, 1080p (env: RESOLUTION, default: 720p)",
     )
     p.add_argument("--width", type=int, default=None, help="Override capture width")
     p.add_argument("--height", type=int, default=None, help="Override capture height")
-    p.add_argument("--fps", type=float, default=30.0, help="Target frame-rate (default: 30)")
     p.add_argument(
-        "--gop", type=int, default=30, help="GOP size (frames per NIM request, default: 30)"
+        "--fps",
+        type=float,
+        default=_env_float("FPS", 30.0),
+        help="Target frame-rate (env: FPS, default: 30)",
     )
-    p.add_argument("--nim", default="127.0.0.1:8003", help="gRPC target (default: 127.0.0.1:8003)")
-    p.add_argument("--nvenc", action="store_true", help="Use NVENC instead of libx264 for encoding")
-    p.add_argument("--bitrate", default="8M", help="Video bitrate (default: 8M)")
+    p.add_argument(
+        "--gop",
+        type=int,
+        default=_env_int("GOP", 30),
+        help="GOP size — frames per NIM request (env: GOP, default: 30)",
+    )
+    p.add_argument(
+        "--nim",
+        default=_env_str("NIM_TARGET", "127.0.0.1:8003"),
+        help="gRPC target (env: NIM_TARGET, default: 127.0.0.1:8003)",
+    )
+    p.add_argument(
+        "--nvenc",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("NVENC"),
+        help="Use NVENC instead of libx264 for encoding (env: NVENC)",
+    )
+    p.add_argument(
+        "--bitrate",
+        default=_env_str("BITRATE", "8M"),
+        help="Video bitrate (env: BITRATE, default: 8M)",
+    )
     p.add_argument(
         "--temporal",
         type=lambda s: int(s, 0),
-        default=0xFFFFFFFF,
-        help="NIM temporal smoothing (default: 0xFFFFFFFF)",
+        default=_env_int("TEMPORAL", 0xFFFFFFFF),
+        help="NIM temporal smoothing (env: TEMPORAL, default: 0xFFFFFFFF)",
     )
     p.add_argument(
         "--detect-closure",
         type=lambda s: int(s, 0),
-        default=0,
-        help="NIM detect_closure (default: 0)",
+        default=_env_int("DETECT_CLOSURE", 0),
+        help="NIM detect_closure (env: DETECT_CLOSURE, default: 0)",
     )
     p.add_argument(
         "--eye-size",
         type=lambda s: int(s, 0),
-        default=4,
-        help="NIM eye_size_sensitivity, 2-6 (default: 4)",
+        default=_env_int("EYE_SIZE", 4),
+        help="NIM eye_size_sensitivity, 2-6 (env: EYE_SIZE, default: 4)",
     )
     p.add_argument("--mode", type=lambda s: int(s, 0), default=0, help="DEPRECATED")
     p.add_argument("--quality", type=lambda s: int(s, 0), default=0, help="DEPRECATED")
@@ -660,20 +722,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--head-pose",
-        action="store_true",
-        help="Enable head-pose correction after NIM gaze redirection",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("HEAD_POSE"),
+        help="Enable head-pose correction after NIM gaze redirection (env: HEAD_POSE)",
     )
     p.add_argument(
         "--head-pose-strength",
         type=float,
-        default=1.0,
-        help="Head-pose correction strength: 0.0=no correction, 1.0=full (default: 1.0)",
+        default=_env_float("HEAD_POSE_STRENGTH", 1.0),
+        help="Head-pose correction strength: 0.0=no correction, 1.0=full "
+        "(env: HEAD_POSE_STRENGTH, default: 1.0)",
     )
     p.add_argument(
         "--head-pose-yaw-limit",
         type=float,
-        default=45.0,
-        help="Disable correction when yaw exceeds this angle in degrees (default: 45.0)",
+        default=_env_float("HEAD_POSE_YAW_LIMIT", 45.0),
+        help="Skip correction when |yaw| exceeds this (env: HEAD_POSE_YAW_LIMIT, default: 45.0)",
     )
     return p
 
