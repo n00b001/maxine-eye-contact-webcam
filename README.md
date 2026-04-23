@@ -138,16 +138,38 @@ The Python NIM pipeline supports optional real-time head pose correction that ro
 uv run python maxine_webcam_pipeline.py --head-pose --head-pose-strength 0.8 --resolution 480p
 ```
 
-**Requirements:** Install the optional `mediapipe` dependency. It pins
-`protobuf < 5` which conflicts with the generated `eyecontact_pb2` stubs, so
-install it outside the lockfile (into the venv only). The pipeline gracefully
-disables `--head-pose` when `mediapipe` is missing.
+Two backends are available, selected via `--head-pose-engine` / `HEAD_POSE_ENGINE`:
+
+| Engine | Latency | Effect | Dependencies |
+|--------|---------|--------|--------------|
+| `geometric` (default) | ~5 ms (CPU) | **Roll-only** — in-plane tilt is corrected cleanly; yaw/pitch can't be rotated by a 2D affine | MediaPipe |
+| `liveportrait` | ~37 ms (RTX 4090, fp16) | **Genuine 3D head rotation** — the generative net re-renders the head at the target pose, including occluded pixels | PyTorch + LivePortrait weights (~630 MB) |
+
+**Geometric engine setup.** `mediapipe` pins `protobuf < 5`, which conflicts
+with the generated `eyecontact_pb2` stubs, so it's installed outside the
+lockfile. The pipeline gracefully disables `--head-pose` when `mediapipe`
+is missing.
 
 ```bash
 uv pip install 'mediapipe>=0.10,<0.10.20'
 ```
 
-**Performance note:** Adds approximately 10–20 ms per frame on CPU (MediaPipe Face Mesh dominates).
+**LivePortrait engine setup.** Clone the repo, download weights, install
+the optional extra:
+
+```bash
+git clone --depth 1 https://github.com/KwaiVGI/LivePortrait.git vendor/LivePortrait
+uv sync --extra liveportrait
+uv run python -c "from huggingface_hub import snapshot_download; \
+snapshot_download('KlingTeam/LivePortrait', local_dir='vendor/LivePortrait/pretrained_weights', \
+allow_patterns=['liveportrait/**', 'insightface/**'])"
+```
+
+Set `HEAD_POSE_ENGINE=liveportrait` (default in the shipped systemd unit)
+to use it. First frame pays a ~500 ms warmup cost for CUDA kernel
+compilation; steady-state is ~37 ms/frame on RTX 4090. Setting
+`HEAD_POSE_COMPILE=1` enables `torch.compile` — adds ~60 s first-frame
+compile time for 20–30 % steady-state speedup.
 
 **How thresholds work:** Between `*Low` and `*High`, the redirected gaze linearly transitions from full camera-facing to estimated natural gaze. Above the high threshold, no redirection is applied.
 
@@ -442,8 +464,10 @@ sudo journalctl -u maxine-webcam -f
 | `BITRATE` | `8M` | Video bitrate fed to the NIM |
 | `NVENC` | `0` | Set `1` to use NVENC instead of libx264 |
 | `HEAD_POSE` | `1` | Set `0` to disable head-pose correction |
-| `HEAD_POSE_STRENGTH` | `1.0` | 0.0 = identity, 1.0 = full geometric correction |
+| `HEAD_POSE_ENGINE` | `liveportrait` | `geometric` (CPU, roll-only) or `liveportrait` (GPU, full 3D) |
+| `HEAD_POSE_STRENGTH` | `1.0` | 0.0 = identity, 1.0 = full correction toward frontal |
 | `HEAD_POSE_YAW_LIMIT` | `45.0` | Skip correction when `|yaw|` exceeds this (°) |
+| `HEAD_POSE_COMPILE` | `0` | Enable `torch.compile` for the LP engine (+60 s warmup, -25 % steady-state) |
 | `INPUT_DEVICE` | `/dev/video0` | Physical webcam |
 | `OUTPUT_DEVICE` | `/dev/video10` | v4l2loopback sink |
 

@@ -94,6 +94,22 @@ class TestEnvVarDefaults:
             args = pipeline.build_parser().parse_args(["--no-head-pose"])
             assert args.head_pose is False
 
+    def test_head_pose_engine_env(self):
+        """HEAD_POSE_ENGINE selects the backend."""
+        with patch.dict(os.environ, {"HEAD_POSE_ENGINE": "liveportrait"}):
+            args = pipeline.build_parser().parse_args([])
+            assert args.head_pose_engine == "liveportrait"
+        env = {k: v for k, v in os.environ.items() if k != "HEAD_POSE_ENGINE"}
+        with patch.dict(os.environ, env, clear=True):
+            args = pipeline.build_parser().parse_args([])
+            assert args.head_pose_engine == "geometric"
+
+    def test_head_pose_compile_env(self):
+        """HEAD_POSE_COMPILE toggles torch.compile for the LP engine."""
+        with patch.dict(os.environ, {"HEAD_POSE_COMPILE": "1"}):
+            args = pipeline.build_parser().parse_args([])
+            assert args.head_pose_compile is True
+
 
 class TestPipelineWithoutHeadPose:
     """Tests ensuring existing pipeline behavior is unchanged."""

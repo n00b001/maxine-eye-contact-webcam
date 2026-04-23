@@ -57,6 +57,17 @@ except ImportError as exc:
         exc,
     )
 
+# Optional LivePortrait engine — generative head-pose correction. Heavy
+# deps (torch + CUDA + model weights); install via `uv sync --extra
+# liveportrait` and clone vendor/LivePortrait per README.
+try:
+    from liveportrait_frontalizer import LivePortraitFrontalizer
+except ImportError as exc:
+    LivePortraitFrontalizer = None  # type: ignore[misc,assignment]
+    _LP_IMPORT_ERROR = exc
+else:
+    _LP_IMPORT_ERROR = None
+
 # ---------------------------------------------------------------------------
 # Global shutdown handling
 # ---------------------------------------------------------------------------
@@ -325,6 +336,8 @@ def nim_pipeline_thread(
     head_pose: bool = False,
     head_pose_strength: float = 1.0,
     head_pose_yaw_limit: float = 45.0,
+    head_pose_engine: str = "geometric",
+    head_pose_compile: bool = False,
 ) -> None:
     """
     Collect GOPs from *raw_q*, encode → NIM → decode, push to *out_q*.
@@ -349,23 +362,48 @@ def nim_pipeline_thread(
         stub = eyecontact_pb2_grpc.MaxineEyeContactServiceStub(channel)
         print(f"[Pipeline] gRPC channel -> {grpc_target}")
 
-    # Optional head-pose corrector (initialised once per thread)
+    # Optional head-pose corrector (initialised once per thread). The
+    # engine selector routes between the lightweight MediaPipe+affine path
+    # and the LivePortrait generative path.
     hpe: HeadPoseEstimator | None = None
-    frontalizer: Frontalizer | None = None
+    frontalizer = None  # Frontalizer or LivePortraitFrontalizer
     if head_pose:
-        if HeadPoseEstimator is None or Frontalizer is None:
+        if HeadPoseEstimator is None:
             print(
-                "[Pipeline] WARNING: --head-pose requested but modules not available; "
-                "passing frames through unchanged"
+                "[Pipeline] WARNING: --head-pose requested but mediapipe is not "
+                "installed; passing frames through unchanged"
             )
             head_pose = False
-        else:
+        elif head_pose_engine == "liveportrait":
+            if LivePortraitFrontalizer is None:
+                print(
+                    "[Pipeline] WARNING: HEAD_POSE_ENGINE=liveportrait but "
+                    f"liveportrait_frontalizer failed to import: {_LP_IMPORT_ERROR}. "
+                    "Falling back to geometric engine."
+                )
+                frontalizer = Frontalizer(strength=head_pose_strength) if Frontalizer else None
+            else:
+                hpe = HeadPoseEstimator(static_image_mode=False)
+                frontalizer = LivePortraitFrontalizer(
+                    strength=head_pose_strength, compile_models=head_pose_compile
+                )
+                print(
+                    f"[Pipeline] Head-pose corrector: LivePortrait engine "
+                    f"(strength={head_pose_strength}, yaw_limit={head_pose_yaw_limit}, "
+                    f"torch_compile={head_pose_compile})"
+                )
+        elif Frontalizer is not None:
             hpe = HeadPoseEstimator(static_image_mode=False)
             frontalizer = Frontalizer(strength=head_pose_strength)
             print(
-                f"[Pipeline] Head-pose corrector initialised "
+                f"[Pipeline] Head-pose corrector: geometric engine "
                 f"(strength={head_pose_strength}, yaw_limit={head_pose_yaw_limit})"
             )
+        else:
+            print("[Pipeline] WARNING: no head-pose engine available; disabled")
+            head_pose = False
+        if head_pose and (hpe is None or frontalizer is None):
+            head_pose = False
 
     gop_idx = 0
     while not _shutdown.is_set():
@@ -739,6 +777,27 @@ def build_parser() -> argparse.ArgumentParser:
         default=_env_float("HEAD_POSE_YAW_LIMIT", 45.0),
         help="Skip correction when |yaw| exceeds this (env: HEAD_POSE_YAW_LIMIT, default: 45.0)",
     )
+    p.add_argument(
+        "--head-pose-engine",
+        default=_env_str("HEAD_POSE_ENGINE", "geometric"),
+        choices=["geometric", "liveportrait"],
+        help=(
+            "Correction backend: 'geometric' (MediaPipe + affine warp, CPU, "
+            "roll-only effective) or 'liveportrait' (GPU generative net, "
+            "full 3D head rotation, ~37 ms/frame on RTX 4090). "
+            "env: HEAD_POSE_ENGINE, default: geometric"
+        ),
+    )
+    p.add_argument(
+        "--head-pose-compile",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("HEAD_POSE_COMPILE"),
+        help=(
+            "Enable torch.compile for the LivePortrait engine "
+            "(first-frame latency jumps ~60 s for compilation, then -20..30%% "
+            "steady-state). env: HEAD_POSE_COMPILE, default: off"
+        ),
+    )
     return p
 
 
@@ -793,6 +852,8 @@ def main() -> None:
                 "head_pose": args.head_pose,
                 "head_pose_strength": args.head_pose_strength,
                 "head_pose_yaw_limit": args.head_pose_yaw_limit,
+                "head_pose_engine": args.head_pose_engine,
+                "head_pose_compile": args.head_pose_compile,
             },
             daemon=True,
         ),

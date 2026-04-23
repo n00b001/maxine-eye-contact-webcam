@@ -12,12 +12,41 @@ dependencies = [
     "opencv-python>=4.9.0",
 ]
 
-# NOTE: `mediapipe` is required at runtime to enable `--head-pose`, but it
-# pins `protobuf<5` which is incompatible with the generated `eyecontact_pb2`
-# stubs (built with `protobuf==6`). We therefore do NOT list it in project
-# dependencies or extras; install it separately into a dedicated venv with:
-#     uv pip install 'mediapipe>=0.10,<0.10.20'
-# The pipeline gracefully disables head-pose when mediapipe is not importable.
+# NOTE: `mediapipe` is required at runtime to enable the *geometric* head
+# pose engine, but it pins `protobuf<5` which is incompatible with the
+# generated `eyecontact_pb2` stubs (built with `protobuf==6`). We therefore
+# do NOT list it in project dependencies or extras; users install it out of
+# band per the README. The pipeline gracefully disables geometric head
+# pose when mediapipe is not importable.
+
+# The `liveportrait` extra installs the real head-pose correction engine
+# (PyTorch + LivePortrait runtime deps). Enable with:
+#     uv sync --extra liveportrait
+# torch + torchvision come from the PyTorch CUDA 12.1 wheel index configured
+# under [tool.uv.sources] below.
+[project.optional-dependencies]
+liveportrait = [
+    "torch>=2.3,<2.6",
+    "torchvision>=0.18",
+    "huggingface_hub>=0.24",
+    "imageio>=2.34",
+    "imageio-ffmpeg>=0.5",
+    "omegaconf>=2.3",
+    "tyro>=0.8",
+    "rich>=13.0",
+    "scikit-image>=0.24",
+    "albumentations>=1.4",
+    "onnxruntime-gpu>=1.18,<1.20",
+]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu121" }]
+torchvision = [{ index = "pytorch-cu121" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
 
 [project.scripts]
 maxine-webcam = "maxine_webcam_pipeline:main"
@@ -35,7 +64,11 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-extend-exclude = ["eyecontact_pb2.py", "eyecontact_pb2_grpc.py"]
+extend-exclude = [
+    "eyecontact_pb2.py",
+    "eyecontact_pb2_grpc.py",
+    "vendor/**",  # third-party code (LivePortrait) — not our style to enforce
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "N", "UP", "B", "C4", "SIM"]
@@ -58,6 +91,8 @@ omit = [
     "tests/*",
     "eyecontact_pb2.py",
     "eyecontact_pb2_grpc.py",
+    "vendor/*",
+    "liveportrait_frontalizer.py",
 ]
 
 [tool.coverage.report]

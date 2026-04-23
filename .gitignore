@@ -32,6 +32,12 @@ coverage.xml
 htmlcov/
 
 # ---------------------------------------------------------------------------
+# Vendored third-party repositories (see README "Head Pose Correction" for
+# the clone + weight-download commands that populate these)
+# ---------------------------------------------------------------------------
+vendor/
+
+# ---------------------------------------------------------------------------
 # IDE / Agent metadata
 # ---------------------------------------------------------------------------
 .omc/
