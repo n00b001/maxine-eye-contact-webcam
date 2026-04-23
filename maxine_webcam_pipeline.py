@@ -361,7 +361,7 @@ def nim_pipeline_thread(
             head_pose = False
         else:
             hpe = HeadPoseEstimator(static_image_mode=False)
-            frontalizer = Frontalizer(output_size=(256, 256), strength=head_pose_strength)
+            frontalizer = Frontalizer(strength=head_pose_strength)
             print(
                 f"[Pipeline] Head-pose corrector initialised "
                 f"(strength={head_pose_strength}, yaw_limit={head_pose_yaw_limit})"

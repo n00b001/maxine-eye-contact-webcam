@@ -21,13 +21,11 @@ class TestFrontalizerInit:
     def test_init_default(self):
         """Frontalizer initializes with default parameters."""
         frontalizer = Frontalizer()
-        assert frontalizer.output_size == (256, 256)
         assert frontalizer.strength == 1.0
 
-    def test_init_custom_params(self):
-        """Frontalizer accepts custom output_size and strength."""
-        frontalizer = Frontalizer(output_size=(512, 512), strength=0.5)
-        assert frontalizer.output_size == (512, 512)
+    def test_init_custom_strength(self):
+        """Frontalizer accepts custom strength."""
+        frontalizer = Frontalizer(strength=0.5)
         assert frontalizer.strength == 0.5
 
 
@@ -80,9 +78,15 @@ class TestFrontalizerComputeWarpMatrix:
 class TestFrontalizerFrontalize:
     """Tests for Frontalizer.frontalize()."""
 
-    def test_frontalize_returns_correct_size(self, synthetic_frontal_face):
-        """frontalize returns an image of the configured output_size."""
-        frontalizer = Frontalizer(output_size=(256, 256))
+    def test_frontalize_returns_full_frame_shape(self, synthetic_frontal_face):
+        """frontalize returns an image with the same shape as the input frame.
+
+        Regression guard: the previous implementation wrote to a fixed
+        256x256 window anchored at the top-left of the warped frame, which
+        excluded the face region entirely and caused the "face removed"
+        artefact when blended back.
+        """
+        frontalizer = Frontalizer()
         landmarks = np.array(
             [
                 [128.0, 128.0],
@@ -100,7 +104,7 @@ class TestFrontalizerFrontalize:
         )
 
         assert result is not None
-        assert result.shape[:2] == (256, 256)
+        assert result.shape == synthetic_frontal_face.shape
 
     def test_frontalize_returns_none_on_failure(self):
         """frontalize returns None if warp matrix computation fails."""
@@ -123,8 +127,8 @@ class TestFrontalizerBlendBack:
         """blend_back produces output of the same size as the original."""
         frontalizer = Frontalizer()
         original = synthetic_frontal_face
-        warped = np.zeros_like(original)
-        face_rect = (64, 64, 192, 192)
+        warped = np.zeros_like(original)  # full-frame warped (same shape)
+        face_rect = (64, 64, 128, 128)
 
         result = frontalizer.blend_back(original, warped, face_rect)
 
@@ -134,13 +138,30 @@ class TestFrontalizerBlendBack:
         """Pixels outside face_rect should remain unchanged."""
         frontalizer = Frontalizer()
         original = synthetic_frontal_face.copy()
-        warped = np.full_like(original, 255)  # bright white warped face
-        face_rect = (100, 100, 156, 156)
+        warped = np.full_like(original, 255)  # bright-white warped frame
+        face_rect = (100, 100, 120, 120)
 
         result = frontalizer.blend_back(original, warped, face_rect)
 
-        # Check a pixel well outside the face rect remains unchanged
+        # A pixel well outside the face rect must match the original.
         assert np.array_equal(result[0, 0], original[0, 0])
+
+    def test_blend_back_preserves_face_region_not_blackened(self, synthetic_frontal_face):
+        """Regression guard for the 'face removed' bug: when the warped
+        frame is a real warp of the original (not empty), the blended face
+        region must still contain visible content, not be blackened out.
+        """
+        frontalizer = Frontalizer(strength=1.0)
+        original = synthetic_frontal_face.copy()
+        warped = cv2.flip(original, 1)  # simulate a real full-frame warp
+        face_rect = (64, 64, 128, 128)
+
+        result = frontalizer.blend_back(original, warped, face_rect)
+
+        center_pixel = result[128, 128]
+        assert int(center_pixel.sum()) > 0, (
+            "face centre pixel is black — frontalizer produced an empty patch"
+        )
 
 
 class TestFrontalizerStrength:
@@ -191,7 +212,7 @@ class TestFrontalizerStrength:
         )
 
         assert result is not None
-        assert result.shape[:2] == (256, 256)
+        assert result.shape == synthetic_frontal_face.shape
         # Full correction should produce a visibly different image
         diff = cv2.absdiff(synthetic_frontal_face, result)
         mean_diff = np.mean(diff)
