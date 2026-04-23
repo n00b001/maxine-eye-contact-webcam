@@ -73,6 +73,11 @@ def _env_str(name: str, default: str) -> str:
 # ---------------------------------------------------------------------------
 _shutdown = threading.Event()
 
+# Raised by output_thread once the first frame has been written to the
+# intermediate v4l2loopback device. main() waits on this before spawning the
+# AR SDK container so AR SDK never tries to open a device with no writer.
+_intermediate_ready = threading.Event()
+
 
 def _handle_signal(signum, frame):  # pragma: no cover
     _shutdown.set()
@@ -201,7 +206,14 @@ def output_thread(
     fps: float,
     q: queue.Queue[np.ndarray],
 ) -> None:
-    """Write BGR frames from ``q`` to ``device`` via ffmpeg (v4l2)."""
+    """Write BGR frames from ``q`` to ``device`` via ffmpeg (v4l2).
+
+    The output pixel format is chosen for the downstream reader: YUYV422 is
+    what the AR SDK binary expects when the intermediate v4l2loopback device
+    is its camera input. Final-output Zoom/Teams/Chrome readers accept YUYV
+    too. Override with ``OUTPUT_FORMAT=yuv420p`` etc. if needed.
+    """
+    out_fmt = _env_str("OUTPUT_FORMAT", "yuyv422")
     cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -221,11 +233,11 @@ def output_thread(
         "-f",
         "v4l2",
         "-pix_fmt",
-        "yuv420p",
+        out_fmt,
         device,
     ]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-    print(f"[Output] {width}x{height}@{fps:.0f} -> {device}", flush=True)
+    print(f"[Output] {width}x{height}@{fps:.0f} -> {device} ({out_fmt})", flush=True)
 
     frame_interval = 1.0 / fps
     next_time: float | None = None
@@ -255,6 +267,10 @@ def output_thread(
             break
         next_time += frame_interval
         written += 1
+        if written == 1:
+            # Tell main() it's safe to spawn the AR SDK container now that
+            # the intermediate v4l2loopback device has a live writer.
+            _intermediate_ready.set()
 
     try:
         proc.stdin.close()
@@ -306,6 +322,11 @@ def process_thread(
     strength: float,
     yaw_limit: float,
     compile_models: bool,
+    pitch_strength: float,
+    yaw_strength: float,
+    roll_strength: float,
+    pitch_limit: float,
+    roll_limit: float,
 ) -> None:
     """Pull frames from ``raw_q``, apply head-pose correction, push to ``out_q``."""
     mods = _load_hp_modules(engine)
@@ -318,10 +339,15 @@ def process_thread(
     fr_kwargs: dict[str, Any] = {"strength": strength}
     if engine == "liveportrait":
         fr_kwargs["compile_models"] = compile_models
+        fr_kwargs["pitch_strength"] = pitch_strength
+        fr_kwargs["yaw_strength"] = yaw_strength
+        fr_kwargs["roll_strength"] = roll_strength
     frontalizer = fr_cls(**fr_kwargs)
     print(
-        f"[Pipeline] engine={engine}  strength={strength}  yaw_limit={yaw_limit}  "
-        f"compile={compile_models}",
+        f"[Pipeline] engine={engine}  strength={strength}  compile={compile_models}  "
+        f"pitch(s={pitch_strength}, lim={pitch_limit})  "
+        f"yaw(s={yaw_strength}, lim={yaw_limit})  "
+        f"roll(s={roll_strength}, lim={roll_limit})",
         flush=True,
     )
 
@@ -346,7 +372,13 @@ def process_thread(
             pose = hpe.estimate_from_landmarks(landmarks, frame.shape[:2])
             if pose is not None:
                 pitch, yaw, roll = pose
-                if abs(yaw) < yaw_limit:
+                # Per-axis skip gates. Exceeding any limit passes the frame
+                # through uncorrected — LivePortrait produces uncanny warps
+                # at extreme angles, so we prefer the raw feed over a glitch.
+                within_gates = (
+                    abs(yaw) < yaw_limit and abs(pitch) < pitch_limit and abs(roll) < roll_limit
+                )
+                if within_gates:
                     try:
                         warped = frontalizer.frontalize(frame, landmarks, pitch, yaw, roll)
                         if warped is not None:
@@ -359,7 +391,7 @@ def process_thread(
                         print(f"[Pipeline] correction error: {exc}", flush=True)
                         passthrough += 1
                 else:
-                    passthrough += 1  # yaw out of range -> pass-through
+                    passthrough += 1  # axis out of range -> pass-through
             else:
                 passthrough += 1
         else:
@@ -421,8 +453,40 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--head-pose-strength", type=float, default=_env_float("HEAD_POSE_STRENGTH", 1.0)
     )
+    # Per-axis overrides. Each inherits --head-pose-strength when not set;
+    # roll typically wants 0 (preserve natural head tilt) since forcing the
+    # head level looks uncanny on a webcam feed.
+    _default_strength = _env_float("HEAD_POSE_STRENGTH", 1.0)
+    p.add_argument(
+        "--head-pose-pitch-strength",
+        type=float,
+        default=_env_float("HEAD_POSE_PITCH_STRENGTH", _default_strength),
+    )
+    p.add_argument(
+        "--head-pose-yaw-strength",
+        type=float,
+        default=_env_float("HEAD_POSE_YAW_STRENGTH", _default_strength),
+    )
+    p.add_argument(
+        "--head-pose-roll-strength",
+        type=float,
+        default=_env_float("HEAD_POSE_ROLL_STRENGTH", _default_strength),
+    )
+    # Per-axis skip limits (degrees). If |angle| exceeds the axis limit the
+    # frame is passed through uncorrected — LivePortrait is unreliable at
+    # extreme rotations, so we'd rather show the raw feed than a glitch.
     p.add_argument(
         "--head-pose-yaw-limit", type=float, default=_env_float("HEAD_POSE_YAW_LIMIT", 45.0)
+    )
+    p.add_argument(
+        "--head-pose-pitch-limit",
+        type=float,
+        default=_env_float("HEAD_POSE_PITCH_LIMIT", 45.0),
+    )
+    p.add_argument(
+        "--head-pose-roll-limit",
+        type=float,
+        default=_env_float("HEAD_POSE_ROLL_LIMIT", 45.0),
     )
     p.add_argument(
         "--head-pose-compile",
@@ -455,13 +519,24 @@ _GAZE_ENV = [
 
 
 def _start_arsdk_container(
-    *, output_device: str, width: int, height: int
+    *,
+    input_device: str,
+    output_device: str,
+    width: int,
+    height: int,
 ) -> subprocess.Popen | None:  # pragma: no cover
     """Launch the AR SDK eye-contact Docker container as a child process.
 
-    Returns the Popen, or None if START_ARSDK=0 (user is running Stage 1
-    out-of-band). The container name and image are env-configurable; all
-    GAZE_* tuning knobs are forwarded into the container.
+    This runs AFTER the LivePortrait head-pose stage in Python, so:
+      * ``input_device`` — host v4l2loopback device that receives Python's
+        head-pose-corrected frames. Remapped into the container as
+        ``/dev/video0`` because the AR SDK binary opens that path literally.
+      * ``output_device`` — host v4l2loopback device that the container
+        writes the final gaze-corrected stream into. Remapped as
+        ``/dev/video10`` to match the binary's default.
+
+    Returns the Popen, or None if START_ARSDK=0 (user is running Stage 2
+    out-of-band). All GAZE_* tuning knobs are forwarded into the container.
     """
     if not _env_bool("START_ARSDK", True):
         print("[ARSDK] START_ARSDK=0, skipping container launch", flush=True)
@@ -472,11 +547,12 @@ def _start_arsdk_container(
         "ARSDK_IMAGE",
         "ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest",
     )
-    input_cam = _env_str("PHYSICAL_CAMERA", "/dev/video0")
 
     # Best-effort clean up any stale container from a previous crash
     subprocess.run(["docker", "rm", "-f", name], check=False, capture_output=True)
 
+    # Device remap: host INTERMEDIATE → container /dev/video0 (camera input),
+    # host FINAL → container /dev/video10 (binary's default output path).
     cmd = [
         "docker",
         "run",
@@ -486,9 +562,9 @@ def _start_arsdk_container(
         "--gpus",
         "all",
         "--device",
-        input_cam,
+        f"{input_device}:/dev/video0",
         "--device",
-        output_device,
+        f"{output_device}:/dev/video10",
         "-e",
         "NVIDIA_VISIBLE_DEVICES=all",
         "-e",
@@ -497,18 +573,22 @@ def _start_arsdk_container(
     for var in _GAZE_ENV:
         if var in os.environ:
             cmd.extend(["-e", f"{var}={os.environ[var]}"])
+    # No `--mjpeg`: container's /dev/video0 is a v4l2loopback device fed by
+    # Python via ffmpeg in YUYV422, not a USB webcam that needs MJPEG to hit
+    # 30 fps. AR SDK negotiates YUYV natively.
     cmd.extend(
         [
             image,
             "/usr/local/bin/maxine_ar_webcam",
-            "--mjpeg",
-            output_device,
+            "/dev/video10",
             str(width),
             str(height),
         ]
     )
     print(
-        f"[ARSDK] launching container '{name}' -> {output_device} ({width}x{height})",
+        f"[ARSDK] launching container '{name}': "
+        f"host {input_device} -> container /dev/video0 (camera), "
+        f"container /dev/video10 -> host {output_device} ({width}x{height})",
         flush=True,
     )
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -548,9 +628,17 @@ def main() -> None:  # pragma: no cover
     args = build_parser().parse_args()
     width, height = _PRESETS[args.resolution]
 
-    # Stage 1: AR SDK eye-contact Docker container (child of this process).
-    arsdk_proc = _start_arsdk_container(output_device=args.input, width=width, height=height)
-    atexit.register(_stop_arsdk_container, arsdk_proc)
+    # AR SDK runs AFTER LivePortrait so the eye-gaze redirection corrects
+    # the eyes in the head-pose-rotated frame (running gaze first would
+    # aim the eyes at the camera, and the subsequent head rotation would
+    # then send them off-axis).
+    final_output = _env_str("FINAL_OUTPUT", "/dev/video10")
+    # arsdk_proc is spawned LATER — only after output_thread has written
+    # at least one frame to the intermediate device, so AR SDK doesn't
+    # open a v4l2loopback with no writer (which makes the binary exit
+    # with "Failed to open camera").
+    arsdk_proc: subprocess.Popen | None = None
+    atexit.register(lambda: _stop_arsdk_container(arsdk_proc))
 
     raw_q: queue.Queue[np.ndarray] = queue.Queue(maxsize=4)
     out_q: queue.Queue[np.ndarray] = queue.Queue(maxsize=4)
@@ -569,6 +657,11 @@ def main() -> None:  # pragma: no cover
                 "strength": args.head_pose_strength,
                 "yaw_limit": args.head_pose_yaw_limit,
                 "compile_models": args.head_pose_compile,
+                "pitch_strength": args.head_pose_pitch_strength,
+                "yaw_strength": args.head_pose_yaw_strength,
+                "roll_strength": args.head_pose_roll_strength,
+                "pitch_limit": args.head_pose_pitch_limit,
+                "roll_limit": args.head_pose_roll_limit,
             },
             daemon=True,
         ),
@@ -579,16 +672,36 @@ def main() -> None:  # pragma: no cover
         ),
     ]
 
-    # Forward AR SDK container logs into this process's journal so a single
-    # `journalctl -fu maxine-webcam` sees both stages.
-    if arsdk_proc is not None:
-        threads.append(threading.Thread(target=_pump_arsdk_logs, args=(arsdk_proc,), daemon=True))
-
     print("=" * 60, flush=True)
-    print("Maxine combined pipeline — eye contact + head pose", flush=True)
+    print("Maxine combined pipeline — head pose then eye contact", flush=True)
     print("=" * 60, flush=True)
     for t in threads:
         t.start()
+
+    # Wait until the intermediate v4l2loopback device has a live writer.
+    # The Python pipeline must be producing frames BEFORE we spawn the AR
+    # SDK container, otherwise the binary opens its "camera" (= our
+    # intermediate device), gets no data, and exits with "Failed to open
+    # camera". ~180 s covers LivePortrait's torch.compile first-frame cost.
+    print("[Main] waiting for intermediate writer…", flush=True)
+    if not _intermediate_ready.wait(timeout=180.0):
+        print(
+            "[Main] FATAL: intermediate output never produced a frame; shutting down",
+            flush=True,
+        )
+        _shutdown.set()
+    else:
+        arsdk_proc = _start_arsdk_container(
+            input_device=args.output,
+            output_device=final_output,
+            width=width,
+            height=height,
+        )
+        if arsdk_proc is not None:
+            threads.append(
+                threading.Thread(target=_pump_arsdk_logs, args=(arsdk_proc,), daemon=True)
+            )
+            threads[-1].start()
 
     try:
         while not _shutdown.is_set():

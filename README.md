@@ -512,8 +512,13 @@ sudo journalctl -u maxine-webcam -f
 | `NVENC` | `0` | Set `1` to use NVENC instead of libx264 |
 | `HEAD_POSE` | `1` | Set `0` to disable head-pose correction |
 | `HEAD_POSE_ENGINE` | `liveportrait` | `geometric` (CPU, roll-only) or `liveportrait` (GPU, full 3D) |
-| `HEAD_POSE_STRENGTH` | `1.0` | 0.0 = identity, 1.0 = full correction toward frontal |
+| `HEAD_POSE_STRENGTH` | `1.0` | 0.0 = identity, 1.0 = full correction toward frontal (fallback for the per-axis `*_STRENGTH` vars below) |
+| `HEAD_POSE_PITCH_STRENGTH` | `1.0` | Per-axis strength. `1.0` = level pitch, `0.0` = disable pitch correction |
+| `HEAD_POSE_YAW_STRENGTH` | `1.0` | Per-axis strength. `1.0` = face camera, `0.0` = disable yaw correction |
+| `HEAD_POSE_ROLL_STRENGTH` | `0.0` | Per-axis strength. Default `0.0` keeps natural head tilt (forced roll=0 looks uncanny). Set `1.0` to level the head. |
+| `HEAD_POSE_PITCH_LIMIT` | `45.0` | Skip correction when `|pitch|` exceeds this (°) |
 | `HEAD_POSE_YAW_LIMIT` | `45.0` | Skip correction when `|yaw|` exceeds this (°) |
+| `HEAD_POSE_ROLL_LIMIT` | `45.0` | Skip correction when `|roll|` exceeds this (°) |
 | `HEAD_POSE_COMPILE` | `0` | Enable `torch.compile` for the LP engine (+60 s warmup, -25 % steady-state) |
 | `INPUT_DEVICE` | `/dev/video0` | Physical webcam |
 | `OUTPUT_DEVICE` | `/dev/video10` | v4l2loopback sink |

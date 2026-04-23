@@ -30,17 +30,37 @@ Environment="GAZE_HEAD_YAW_HIGH=35.0"
 # --- Head-pose (LivePortrait) tuning -----------------------------------------
 Environment="HEAD_POSE=1"
 Environment="HEAD_POSE_ENGINE=liveportrait"
+# Overall strength — per-axis _STRENGTH overrides below fall back to this.
 Environment="HEAD_POSE_STRENGTH=1.0"
+# Per-axis strength (1.0 = zero that axis = fully correct; 0.0 = preserve
+# source rotation on that axis = disable correction for that axis). Roll
+# defaults to 0.0 because forcing roll=0 looks uncanny on a webcam feed —
+# natural micro-tilt reads as "alive". Flip to 1.0 to level the head.
+Environment="HEAD_POSE_PITCH_STRENGTH=1.0"
+Environment="HEAD_POSE_YAW_STRENGTH=1.0"
+Environment="HEAD_POSE_ROLL_STRENGTH=0.0"
+# Per-axis skip limit (degrees). If |angle| exceeds the limit on ANY axis
+# the frame passes through uncorrected — LP produces uncanny warps at
+# extreme rotations. Raise a limit if you want correction at more extreme
+# angles (at the cost of occasional glitches).
+Environment="HEAD_POSE_PITCH_LIMIT=45.0"
 Environment="HEAD_POSE_YAW_LIMIT=45.0"
+Environment="HEAD_POSE_ROLL_LIMIT=45.0"
 Environment="HEAD_POSE_COMPILE=1"
 
 # --- Pipeline ----------------------------------------------------------------
-# video11: internal intermediate (AR SDK → Python).
-# video10: final virtual webcam seen by Zoom/Teams/Chrome.
-Environment="PHYSICAL_CAMERA=/dev/video0"
-Environment="INPUT_DEVICE=/dev/video11"
-Environment="OUTPUT_DEVICE=/dev/video10"
-Environment="INPUT_FORMAT=bgr24"
+# Stage ordering: HEAD POSE FIRST, then EYE CONTACT.
+#   /dev/video0 → Python LivePortrait head-pose → /dev/video11 → AR SDK
+#   gaze redirection → /dev/video10 → Zoom/Teams/Chrome.
+# Running gaze first would aim the eyes at the camera, and the subsequent
+# head-pose rotation would then send them off-axis again.
+Environment="INPUT_DEVICE=/dev/video0"
+Environment="OUTPUT_DEVICE=/dev/video11"
+Environment="FINAL_OUTPUT=/dev/video10"
+# Camera MJPEG sustains 30 fps at 1080p over USB 2.0; raw YUYV caps at 2 fps.
+Environment="INPUT_FORMAT=mjpeg"
+# YUYV422 is what the AR SDK binary expects from its camera input.
+Environment="OUTPUT_FORMAT=yuyv422"
 Environment="RESOLUTION=1080p"
 Environment="FPS=30"
 Environment="START_ARSDK=1"

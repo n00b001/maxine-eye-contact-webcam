@@ -57,6 +57,9 @@ class LivePortraitFrontalizer:
         self,
         strength: float = 1.0,
         compile_models: bool = False,
+        pitch_strength: float | None = None,
+        yaw_strength: float | None = None,
+        roll_strength: float | None = None,
     ):
         if not _LP_AVAILABLE:
             raise RuntimeError(
@@ -67,6 +70,13 @@ class LivePortraitFrontalizer:
 
         self.strength = float(strength)
         self.compile_models = bool(compile_models)
+        # Per-axis strengths. If an axis is None it inherits `strength`, so
+        # callers that only pass `strength` keep the original behaviour.
+        # Setting an axis to 0 preserves that axis of the source rotation
+        # (e.g. roll_strength=0 → do not level the head to horizontal).
+        self.pitch_strength = float(strength if pitch_strength is None else pitch_strength)
+        self.yaw_strength = float(strength if yaw_strength is None else yaw_strength)
+        self.roll_strength = float(strength if roll_strength is None else roll_strength)
 
         cfg = InferenceConfig(
             flag_relative_motion=False,  # we drive with absolute target rotation
@@ -151,13 +161,15 @@ class LivePortraitFrontalizer:
         x_s_info = self._wrapper.get_kp_info(source, flag_refine_info=True)
         x_s = self._wrapper.transform_keypoint(x_s_info)
 
-        # Target = blend of source rotation and (0, 0, 0) by strength.
-        # strength=1 → full frontal; strength=0 → unchanged (identity).
+        # Target = per-axis blend of source rotation and 0.
+        # *_strength=1 → that axis fully zeroed (frontal);
+        # *_strength=0 → that axis preserved from source (no correction).
+        # Defaulting roll_strength=0 in the systemd unit keeps the head's
+        # natural tilt — forcing roll=0 looks uncanny in a webcam feed.
         target_info = dict(x_s_info)
-        alpha = 1.0 - self.strength
-        target_info["pitch"] = x_s_info["pitch"] * alpha
-        target_info["yaw"] = x_s_info["yaw"] * alpha
-        target_info["roll"] = x_s_info["roll"] * alpha
+        target_info["pitch"] = x_s_info["pitch"] * (1.0 - self.pitch_strength)
+        target_info["yaw"] = x_s_info["yaw"] * (1.0 - self.yaw_strength)
+        target_info["roll"] = x_s_info["roll"] * (1.0 - self.roll_strength)
         x_d = self._wrapper.transform_keypoint(target_info)
 
         out_dct = self._wrapper.warp_decode(feature_3d, x_s, x_d)
