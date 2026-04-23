@@ -5,22 +5,40 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-# 3D facial landmark model (standard 468-point MediaPipe topology)
-# Use a simplified subset of key landmarks for solvePnP
-# Nose tip, chin, left eye corner, right eye corner, left mouth corner, right mouth corner
+# 3D face model in OpenCV camera-space: X right (in image), Y down (in
+# image), Z forward (into scene / behind the nose tip).
+#
+# Convention verification on real MediaPipe output (gcs_portrait.jpg): for a
+# subject roughly facing the camera, landmark 33 lands at image-x ≈ 269 with
+# the nose at 317, i.e. landmark 33 is to the *left* of the nose in image
+# space. So in camera coords (X right) landmark 33 has NEGATIVE X. Whether
+# that corresponds to the subject's anatomical left depends on whether the
+# image was mirrored before MediaPipe saw it — but for pose estimation we
+# only need the 3D model to agree with what MediaPipe actually emits.
+#
+# Eyes and mouth are offset from the nose:
+#   • 33 / 263 (outer eye corners): negative/positive X, above nose → -Y,
+#     and slightly recessed from camera → +Z.
+#   • 61 / 291 (mouth corners): negative/positive X, below nose → +Y, +Z.
+#   • 199 (chin): below nose → +Y, and behind nose → +Z.
+# Anthropometric magnitudes (≈) are the canonical ones from Lepetit 2009.
+#
+# An earlier revision used Y-up + negative-Z conventions, which caused
+# solvePnP to return rotations near a 180° flip around the X axis — so even
+# perfectly frontal faces came back with pitch ≈ ±180° and roll ≈ ±180°.
 FACE_MODEL_3D = np.array(
     [
-        [0.0, 0.0, 0.0],  # Nose tip
-        [0.0, -63.6, -12.5],  # Chin
-        [-43.3, 32.7, -26.0],  # Left eye left corner
-        [43.3, 32.7, -26.0],  # Right eye right corner
-        [-28.9, -28.9, -24.1],  # Left mouth corner
-        [28.9, -28.9, -24.1],  # Right mouth corner
+        [0.0, 0.0, 0.0],  # 1   — nose tip
+        [0.0, 63.6, 12.5],  # 199 — chin (below nose, behind)
+        [-43.3, -32.7, 26.0],  # 33  — outer eye corner on image-left (above nose, behind)
+        [43.3, -32.7, 26.0],  # 263 — outer eye corner on image-right
+        [-28.9, 28.9, 24.1],  # 61  — mouth corner on image-left (below nose, behind)
+        [28.9, 28.9, 24.1],  # 291 — mouth corner on image-right
     ],
     dtype=np.float64,
 )
 
-# MediaPipe landmark indices corresponding to the above 3D points
+# MediaPipe Face Mesh landmark indices matching FACE_MODEL_3D row-for-row.
 LANDMARK_INDICES = [1, 199, 33, 263, 61, 291]
 
 
@@ -118,12 +136,17 @@ class HeadPoseEstimator:
         camera_matrix = self._build_camera_matrix(h, w)
         dist_coeffs = np.zeros((4, 1), dtype=np.float64)
 
+        # SQPNP is required here: SOLVEPNP_ITERATIVE frequently picks the
+        # non-physical mirror solution (face placed behind the camera plane
+        # with a 180° roll) for near-frontal faces, producing Euler angles
+        # near ±180°. SQPNP (OpenCV >= 4.6) always returns the solution with
+        # the subject in front of the camera.
         success, rotation_vec, _ = cv2.solvePnP(
             FACE_MODEL_3D,
             landmarks_2d,
             camera_matrix,
             dist_coeffs,
-            flags=cv2.SOLVEPNP_ITERATIVE,
+            flags=cv2.SOLVEPNP_SQPNP,
         )
         if not success:
             return None

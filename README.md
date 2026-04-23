@@ -138,10 +138,13 @@ The Python NIM pipeline supports optional real-time head pose correction that ro
 uv run python maxine_webcam_pipeline.py --head-pose --head-pose-strength 0.8 --resolution 480p
 ```
 
-**Requirements:** Install the optional `mediapipe` dependency:
+**Requirements:** Install the optional `mediapipe` dependency. It pins
+`protobuf < 5` which conflicts with the generated `eyecontact_pb2` stubs, so
+install it outside the lockfile (into the venv only). The pipeline gracefully
+disables `--head-pose` when `mediapipe` is missing.
 
 ```bash
-uv add mediapipe
+uv pip install 'mediapipe>=0.10,<0.10.20'
 ```
 
 **Performance note:** Adds approximately 10–20 ms per frame on CPU (MediaPipe Face Mesh dominates).
@@ -324,8 +327,10 @@ uv python install 3.12
 uv python pin 3.12
 uv sync
 
-# Optional: install mediapipe for head pose correction
-uv add mediapipe
+# Optional: install mediapipe for head-pose correction (outside the
+# lockfile because mediapipe pins protobuf<5 while the generated pb2
+# stubs require protobuf>=5).
+uv pip install 'mediapipe>=0.10,<0.10.20'
 ```
 
 #### 5. Build protobuf definitions

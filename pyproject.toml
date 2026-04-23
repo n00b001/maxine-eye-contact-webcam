@@ -7,10 +7,17 @@ license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = [
     "grpcio>=1.62.0",
-    "protobuf>=4.25.0",
+    "protobuf>=5.26.0",
     "numpy>=1.24.0",
     "opencv-python>=4.9.0",
 ]
+
+# NOTE: `mediapipe` is required at runtime to enable `--head-pose`, but it
+# pins `protobuf<5` which is incompatible with the generated `eyecontact_pb2`
+# stubs (built with `protobuf==6`). We therefore do NOT list it in project
+# dependencies or extras; install it separately into a dedicated venv with:
+#     uv pip install 'mediapipe>=0.10,<0.10.20'
+# The pipeline gracefully disables head-pose when mediapipe is not importable.
 
 [project.scripts]
 maxine-webcam = "maxine_webcam_pipeline:main"
