@@ -140,17 +140,23 @@ ok "Python environment built in /opt"
 # 7. Install & start systemd services
 # ---------------------------------------------------------------------------
 info "Installing systemd services..."
-TMP_AR="/tmp/$SERVICE_AR"
-cp "$SCRIPT_DIR/$SERVICE_AR" "$TMP_AR"
-sed -i "s|arsdk-gaze:latest|$GHCR_IMAGE|g" "$TMP_AR"
-sudo cp "$TMP_AR" /etc/systemd/system/
-rm -f "$TMP_AR"
-sudo cp "$SCRIPT_DIR/$SERVICE_HP" /etc/systemd/system/
+# Stage 1 unit file already contains the full GHCR URL — copy verbatim.
+sudo cp "$SCRIPT_DIR/$SERVICE_AR" /etc/systemd/system/
+# Stage 2 (head-pose) runs as the invoking user so the venv, $HOME/.local/bin/uv,
+# and the NVIDIA device nodes (owned by the `video` / `render` groups) are
+# accessible. Substitute __MAXINE_USER__ placeholder at install time so the
+# repo file doesn't hardcode a username.
+TMP_HP="/tmp/$SERVICE_HP"
+cp "$SCRIPT_DIR/$SERVICE_HP" "$TMP_HP"
+MAXINE_USER="${SUDO_USER:-$USER}"
+sed -i "s|__MAXINE_USER__|$MAXINE_USER|g" "$TMP_HP"
+sudo cp "$TMP_HP" /etc/systemd/system/
+rm -f "$TMP_HP"
 sudo systemctl daemon-reload
 sudo systemctl enable --now "$SERVICE_AR"
 ok "Enabled+started: $SERVICE_AR"
 sudo systemctl enable --now "$SERVICE_HP"
-ok "Enabled+started: $SERVICE_HP"
+ok "Enabled+started: $SERVICE_HP (User=$MAXINE_USER)"
 
 # ---------------------------------------------------------------------------
 # 8. Summary

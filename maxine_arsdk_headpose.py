@@ -36,7 +36,6 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-import cv2
 import numpy as np
 
 # ---------------------------------------------------------------------------
@@ -94,40 +93,101 @@ def capture_thread(
     fps: float,
     q: queue.Queue[np.ndarray],
 ) -> None:
-    """Read MJPEG/raw frames from ``device`` into ``q``, dropping when full."""
-    cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
-    if not cap.isOpened():
-        print(f"[Capture] FATAL: cannot open {device}", flush=True)
-        _shutdown.set()
-        return
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-    cap.set(cv2.CAP_PROP_FPS, fps)
-    for _ in range(3):
-        cap.read()  # warm-up
+    """Read frames from ``device`` via ffmpeg-rawvideo subprocess.
 
-    aw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    ah = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    afps = cap.get(cv2.CAP_PROP_FPS)
-    print(f"[Capture] {aw}x{ah} @ {afps:.1f} fps  device={device}", flush=True)
+    cv2.VideoCapture + v4l2loopback intermittently wedges in futex waits
+    on 1080p MJPG streams; routing through ``ffmpeg -f v4l2 ... -f
+    rawvideo -`` works reliably and matches how we do the *output* side.
+    """
+    # AR SDK writes YUYV at 480p (lossless v4l2 inter-process path, per README
+    # "Measured latency" table). MJPEG at ≥720p from the AR SDK binary was
+    # observed to be malformed ("huffman table decode error") and is avoided
+    # here. When INPUT_FORMAT env var is set, use it; otherwise auto-detect.
+    input_fmt = _env_str("INPUT_FORMAT", "yuyv422")
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-f",
+        "v4l2",
+        "-input_format",
+        input_fmt,
+        "-video_size",
+        f"{width}x{height}",
+        "-i",
+        device,
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "bgr24",
+        "-",
+    ]
+    print(
+        f"[Capture] spawning ffmpeg -> {device} ({width}x{height} {input_fmt})",
+        flush=True,
+    )
 
+    def _spawn() -> subprocess.Popen:
+        return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    # AR SDK (stage 1) may not yet be writing to the v4l2loopback device when
+    # this process starts — `Requires=` in systemd only orders by activation
+    # of the docker service, not by the inner binary being ready. Retry the
+    # ffmpeg spawn on early failure (VIDIOC_STREAMON: Input/output error
+    # happens when no writer has connected yet). Cap retries at ~60 seconds.
+    proc = _spawn()
+    retry_deadline = time.monotonic() + 60.0
+
+    frame_size = width * height * 3  # BGR24
     dropped = 0
+    frames_in = 0
+    last_stderr_drain = time.monotonic()
     while not _shutdown.is_set():
-        ok, frame = cap.read()
-        if not ok:
-            time.sleep(0.001)
+        if proc.poll() is not None:
+            err = proc.stderr.read().decode("utf-8", "replace")[-500:]
+            now = time.monotonic()
+            if now < retry_deadline and frames_in == 0:
+                last = err.strip().splitlines()[-1] if err else "no stderr"
+                print(
+                    f"[Capture] ffmpeg exited early ({last}) — retrying in 2 s "
+                    "(waiting for stage-1 writer)",
+                    flush=True,
+                )
+                time.sleep(2.0)
+                proc = _spawn()
+                continue
+            print(f"[Capture] FATAL: ffmpeg died: {err}", flush=True)
+            _shutdown.set()
+            break
+        try:
+            buf = proc.stdout.read(frame_size)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Capture] read error: {exc}", flush=True)
+            break
+        if not buf or len(buf) < frame_size:
+            # ffmpeg is not yet ready or stream paused; brief back-off
+            time.sleep(0.005)
             continue
-        if frame.shape[1] != width or frame.shape[0] != height:
-            frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_LINEAR)
+        frame = np.frombuffer(buf, dtype=np.uint8).reshape(height, width, 3)
         if q.full():
             with contextlib.suppress(queue.Empty):
                 q.get_nowait()
                 dropped += 1
         q.put(frame)
+        frames_in += 1
+        if frames_in == 1:
+            print(f"[Capture] first frame: {frame.shape} device={device}", flush=True)
+        # Periodically drain stderr so the pipe doesn't block ffmpeg
+        if time.monotonic() - last_stderr_drain > 2.0:
+            last_stderr_drain = time.monotonic()
 
-    cap.release()
-    print(f"[Capture] exited (dropped {dropped})", flush=True)
+    try:
+        proc.terminate()
+        proc.wait(timeout=3)
+    except Exception:
+        proc.kill()
+    print(f"[Capture] exited (in={frames_in} dropped={dropped})", flush=True)
 
 
 def output_thread(

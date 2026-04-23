@@ -6,7 +6,7 @@ Requires=maxine-ar-sdk-webcam.service
 
 [Service]
 Type=simple
-User=%I
+User=__MAXINE_USER__
 WorkingDirectory=/opt/maxine-eye-contact-webcam
 
 # Edit via `sudo systemctl edit maxine-webcam --full`.
@@ -14,7 +14,7 @@ WorkingDirectory=/opt/maxine-eye-contact-webcam
 # ~33 ms AR SDK gaze + ~25 ms LivePortrait head-pose + kernel v4l2 hops.
 Environment="INPUT_DEVICE=/dev/video11"
 Environment="OUTPUT_DEVICE=/dev/video10"
-Environment="RESOLUTION=1080p"
+Environment="RESOLUTION=480p"
 Environment="FPS=30"
 Environment="HEAD_POSE=1"
 Environment="HEAD_POSE_ENGINE=liveportrait"

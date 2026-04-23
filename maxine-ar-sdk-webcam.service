@@ -30,6 +30,9 @@ Environment="GAZE_HEAD_YAW_HIGH=35.0"
 # Pull latest image and run
 ExecStartPre=-/usr/bin/docker pull ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest
 ExecStartPre=-/usr/bin/docker rm -f maxine-ar-sdk-webcam
+# Disable low-light auto-exposure frame-rate drop (Logitech cameras fall to
+# 15fps in dim light via exposure_dynamic_framerate). Ignore if unsupported.
+ExecStartPre=-/usr/bin/v4l2-ctl -d /dev/video0 --set-ctrl=exposure_dynamic_framerate=0
 
 ExecStart=/usr/bin/docker run \
     --rm \
@@ -53,7 +56,7 @@ ExecStart=/usr/bin/docker run \
     -e GAZE_HEAD_YAW_LOW=${GAZE_HEAD_YAW_LOW} \
     -e GAZE_HEAD_YAW_HIGH=${GAZE_HEAD_YAW_HIGH} \
     ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest \
-    /usr/local/bin/maxine_ar_webcam --mjpeg /dev/video11 1920 1080
+    /usr/local/bin/maxine_ar_webcam /dev/video11 640 480
 
 ExecStop=/usr/bin/docker stop -t 5 maxine-ar-sdk-webcam
 ExecStopPost=-/usr/bin/docker rm -f maxine-ar-sdk-webcam
