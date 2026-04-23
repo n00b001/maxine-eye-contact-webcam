@@ -99,11 +99,14 @@ def capture_thread(
     on 1080p MJPG streams; routing through ``ffmpeg -f v4l2 ... -f
     rawvideo -`` works reliably and matches how we do the *output* side.
     """
-    # AR SDK writes YUYV at 480p (lossless v4l2 inter-process path, per README
-    # "Measured latency" table). MJPEG at ≥720p from the AR SDK binary was
-    # observed to be malformed ("huffman table decode error") and is avoided
-    # here. When INPUT_FORMAT env var is set, use it; otherwise auto-detect.
-    input_fmt = _env_str("INPUT_FORMAT", "yuyv422")
+    # AR SDK binary ALWAYS writes raw BGR24 to the v4l2loopback output device
+    # regardless of resolution (the `--mjpeg` flag only applies to camera
+    # input). We therefore read BGR24 by default. A previous iteration tried
+    # MJPEG / YUYV because of misreading the README's "format" column
+    # (720p MJPEG / 1080p MJPEG there refers to CAMERA input format, not
+    # v4l2loopback output). YUYV 1080p from the camera caps at 2 fps due
+    # to USB 2.0 bandwidth; BGR24 at 1080p via MJPEG input sustains 30 fps.
+    input_fmt = _env_str("INPUT_FORMAT", "bgr24")
     cmd = [
         "ffmpeg",
         "-hide_banner",
