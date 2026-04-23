@@ -25,6 +25,7 @@ everything through ``Environment=`` lines.
 from __future__ import annotations
 
 import argparse
+import atexit
 import contextlib
 import os
 import queue
@@ -431,9 +432,125 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# ---------------------------------------------------------------------------
+# AR SDK Docker container lifecycle (Stage 1 runs as a child of this process
+# so there's a single systemd unit owning the whole pipeline).
+# ---------------------------------------------------------------------------
+
+_GAZE_ENV = [
+    "GAZE_EYE_SIZE",
+    "GAZE_LANDMARKS",
+    "GAZE_NO_REDIRECT",
+    "GAZE_NO_STABILIZE",
+    "GAZE_NO_CUDA_GRAPH",
+    "GAZE_PITCH_LOW",
+    "GAZE_PITCH_HIGH",
+    "GAZE_YAW_LOW",
+    "GAZE_YAW_HIGH",
+    "GAZE_HEAD_PITCH_LOW",
+    "GAZE_HEAD_PITCH_HIGH",
+    "GAZE_HEAD_YAW_LOW",
+    "GAZE_HEAD_YAW_HIGH",
+]
+
+
+def _start_arsdk_container(
+    *, output_device: str, width: int, height: int
+) -> subprocess.Popen | None:  # pragma: no cover
+    """Launch the AR SDK eye-contact Docker container as a child process.
+
+    Returns the Popen, or None if START_ARSDK=0 (user is running Stage 1
+    out-of-band). The container name and image are env-configurable; all
+    GAZE_* tuning knobs are forwarded into the container.
+    """
+    if not _env_bool("START_ARSDK", True):
+        print("[ARSDK] START_ARSDK=0, skipping container launch", flush=True)
+        return None
+
+    name = _env_str("ARSDK_CONTAINER_NAME", "maxine-arsdk")
+    image = _env_str(
+        "ARSDK_IMAGE",
+        "ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest",
+    )
+    input_cam = _env_str("PHYSICAL_CAMERA", "/dev/video0")
+
+    # Best-effort clean up any stale container from a previous crash
+    subprocess.run(["docker", "rm", "-f", name], check=False, capture_output=True)
+
+    cmd = [
+        "docker",
+        "run",
+        "--rm",
+        "--name",
+        name,
+        "--gpus",
+        "all",
+        "--device",
+        input_cam,
+        "--device",
+        output_device,
+        "-e",
+        "NVIDIA_VISIBLE_DEVICES=all",
+        "-e",
+        "NVIDIA_DRIVER_CAPABILITIES=compute,utility,video",
+    ]
+    for var in _GAZE_ENV:
+        if var in os.environ:
+            cmd.extend(["-e", f"{var}={os.environ[var]}"])
+    cmd.extend(
+        [
+            image,
+            "/usr/local/bin/maxine_ar_webcam",
+            "--mjpeg",
+            output_device,
+            str(width),
+            str(height),
+        ]
+    )
+    print(
+        f"[ARSDK] launching container '{name}' -> {output_device} ({width}x{height})",
+        flush=True,
+    )
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+
+def _stop_arsdk_container(proc: subprocess.Popen | None) -> None:  # pragma: no cover
+    if proc is None:
+        return
+    name = _env_str("ARSDK_CONTAINER_NAME", "maxine-arsdk")
+    subprocess.run(["docker", "stop", "-t", "5", name], check=False, capture_output=True)
+    subprocess.run(["docker", "rm", "-f", name], check=False, capture_output=True)
+    with contextlib.suppress(Exception):
+        proc.terminate()
+        proc.wait(timeout=3)
+    with contextlib.suppress(Exception):
+        proc.kill()
+    print("[ARSDK] container stopped", flush=True)
+
+
+def _pump_arsdk_logs(proc: subprocess.Popen) -> None:  # pragma: no cover
+    """Forward AR SDK container stdout/stderr to this process's stdout so it
+    shows up in journalctl alongside the head-pose logs."""
+    try:
+        for line in iter(proc.stdout.readline, b""):
+            if _shutdown.is_set():
+                break
+            if not line:
+                break
+            text = line.decode("utf-8", errors="replace").rstrip()
+            if text:
+                print(f"[ARSDK] {text}", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ARSDK] log pump error: {exc}", flush=True)
+
+
 def main() -> None:  # pragma: no cover
     args = build_parser().parse_args()
     width, height = _PRESETS[args.resolution]
+
+    # Stage 1: AR SDK eye-contact Docker container (child of this process).
+    arsdk_proc = _start_arsdk_container(output_device=args.input, width=width, height=height)
+    atexit.register(_stop_arsdk_container, arsdk_proc)
 
     raw_q: queue.Queue[np.ndarray] = queue.Queue(maxsize=4)
     out_q: queue.Queue[np.ndarray] = queue.Queue(maxsize=4)
@@ -462,8 +579,13 @@ def main() -> None:  # pragma: no cover
         ),
     ]
 
+    # Forward AR SDK container logs into this process's journal so a single
+    # `journalctl -fu maxine-webcam` sees both stages.
+    if arsdk_proc is not None:
+        threads.append(threading.Thread(target=_pump_arsdk_logs, args=(arsdk_proc,), daemon=True))
+
     print("=" * 60, flush=True)
-    print("Maxine combined pipeline — stage 2 (head-pose correction)", flush=True)
+    print("Maxine combined pipeline — eye contact + head pose", flush=True)
     print("=" * 60, flush=True)
     for t in threads:
         t.start()
@@ -472,6 +594,13 @@ def main() -> None:  # pragma: no cover
         while not _shutdown.is_set():
             if any(not t.is_alive() for t in threads):
                 print("[Main] a thread died; shutting down", flush=True)
+                _shutdown.set()
+                break
+            if arsdk_proc is not None and arsdk_proc.poll() is not None:
+                print(
+                    f"[Main] AR SDK container exited (rc={arsdk_proc.returncode}); shutting down",
+                    flush=True,
+                )
                 _shutdown.set()
                 break
             time.sleep(0.5)

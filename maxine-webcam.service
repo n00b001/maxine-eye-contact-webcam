@@ -1,32 +1,68 @@
 [Unit]
-Description=Stage 2: Maxine head-pose correction (LivePortrait) — /dev/video11 → /dev/video10
-After=network-online.target maxine-ar-sdk-webcam.service
-Wants=network-online.target
-Requires=maxine-ar-sdk-webcam.service
+Description=Maxine Eye Contact + Head Pose Correction Webcam
+Documentation=https://github.com/n00b001/maxine-eye-contact-webcam
+After=docker.service network-online.target
+Wants=docker.service network-online.target
 
 [Service]
 Type=simple
 User=__MAXINE_USER__
 WorkingDirectory=/opt/maxine-eye-contact-webcam
+TimeoutStartSec=300
 
-# Edit via `sudo systemctl edit maxine-webcam --full`.
-# Combined with maxine-ar-sdk-webcam, end-to-end latency is ~60 ms:
-# ~33 ms AR SDK gaze + ~25 ms LivePortrait head-pose + kernel v4l2 hops.
-Environment="INPUT_DEVICE=/dev/video11"
-Environment="OUTPUT_DEVICE=/dev/video10"
-Environment="RESOLUTION=1080p"
-Environment="INPUT_FORMAT=bgr24"
-Environment="FPS=30"
+# --- Eye-contact (AR SDK Docker) tuning --------------------------------------
+# Forwarded into the AR SDK container by maxine_arsdk_headpose.py.
+# See README "Tunable Gaze Parameters" for ranges.
+Environment="GAZE_EYE_SIZE=2"
+Environment="GAZE_LANDMARKS=126"
+Environment="GAZE_NO_REDIRECT=0"
+Environment="GAZE_NO_STABILIZE=0"
+Environment="GAZE_NO_CUDA_GRAPH=0"
+Environment="GAZE_PITCH_LOW=10.0"
+Environment="GAZE_PITCH_HIGH=35.0"
+Environment="GAZE_YAW_LOW=10.0"
+Environment="GAZE_YAW_HIGH=35.0"
+Environment="GAZE_HEAD_PITCH_LOW=10.0"
+Environment="GAZE_HEAD_PITCH_HIGH=35.0"
+Environment="GAZE_HEAD_YAW_LOW=10.0"
+Environment="GAZE_HEAD_YAW_HIGH=35.0"
+
+# --- Head-pose (LivePortrait) tuning -----------------------------------------
 Environment="HEAD_POSE=1"
 Environment="HEAD_POSE_ENGINE=liveportrait"
 Environment="HEAD_POSE_STRENGTH=1.0"
 Environment="HEAD_POSE_YAW_LIMIT=45.0"
 Environment="HEAD_POSE_COMPILE=1"
+
+# --- Pipeline ----------------------------------------------------------------
+# video11: internal intermediate (AR SDK → Python).
+# video10: final virtual webcam seen by Zoom/Teams/Chrome.
+Environment="PHYSICAL_CAMERA=/dev/video0"
+Environment="INPUT_DEVICE=/dev/video11"
+Environment="OUTPUT_DEVICE=/dev/video10"
+Environment="INPUT_FORMAT=bgr24"
+Environment="RESOLUTION=1080p"
+Environment="FPS=30"
+Environment="START_ARSDK=1"
+Environment="ARSDK_CONTAINER_NAME=maxine-arsdk"
+Environment="ARSDK_IMAGE=ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest"
 Environment="PYTHONUNBUFFERED=1"
 
-ExecStart=/usr/bin/env bash -c 'export PATH="$HOME/.local/bin:$PATH" && \
-    cd /opt/maxine-eye-contact-webcam && \
-    uv run python maxine_arsdk_headpose.py'
+# Prep: cached pull (no-op if up to date) + clean stale container + disable
+# Logitech-style low-light frame-rate drop so the camera stays at 30 fps.
+ExecStartPre=-/usr/bin/docker pull ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest
+ExecStartPre=-/usr/bin/docker rm -f maxine-arsdk
+ExecStartPre=-/usr/bin/v4l2-ctl -d /dev/video0 --set-ctrl=exposure_dynamic_framerate=0
+
+# One Python process owns everything: it spawns the AR SDK Docker container
+# as a child, pipes its stdout/stderr into this journal, reads the corrected
+# frames from /dev/video11, runs LivePortrait head-pose, and writes the final
+# stream to /dev/video10.
+ExecStart=/usr/bin/env bash -c 'export PATH="$HOME/.local/bin:$PATH" && cd /opt/maxine-eye-contact-webcam && exec uv run python maxine_arsdk_headpose.py'
+
+# Defence in depth: if the Python process ever dies without cleaning up, kill
+# the AR SDK container here too so the next start doesn't hit a name clash.
+ExecStopPost=-/usr/bin/docker rm -f maxine-arsdk
 
 Restart=on-failure
 RestartSec=5

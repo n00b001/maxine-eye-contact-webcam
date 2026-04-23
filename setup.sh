@@ -7,8 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 GHCR_IMAGE="ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest"
-SERVICE_AR="maxine-ar-sdk-webcam.service"
-SERVICE_HP="maxine-webcam.service"
+SERVICE="maxine-webcam.service"
 
 info()  { echo ""; echo "[INFO] $*"; }
 ok()    { echo "  ✓ $*"; }
@@ -139,24 +138,24 @@ ok "Python environment built in /opt"
 # ---------------------------------------------------------------------------
 # 7. Install & start systemd services
 # ---------------------------------------------------------------------------
-info "Installing systemd services..."
-# Stage 1 unit file already contains the full GHCR URL — copy verbatim.
-sudo cp "$SCRIPT_DIR/$SERVICE_AR" /etc/systemd/system/
-# Stage 2 (head-pose) runs as the invoking user so the venv, $HOME/.local/bin/uv,
-# and the NVIDIA device nodes (owned by the `video` / `render` groups) are
-# accessible. Substitute __MAXINE_USER__ placeholder at install time so the
-# repo file doesn't hardcode a username.
-TMP_HP="/tmp/$SERVICE_HP"
-cp "$SCRIPT_DIR/$SERVICE_HP" "$TMP_HP"
+info "Installing single systemd service..."
+# Legacy cleanup: remove the pre-merge Stage-1-only service if it still
+# exists from an earlier setup.sh run.
+sudo systemctl disable --now maxine-ar-sdk-webcam.service 2>/dev/null || true
+sudo rm -f /etc/systemd/system/maxine-ar-sdk-webcam.service
+
+# The service runs as the invoking user so the venv, $HOME/.local/bin/uv,
+# and the NVIDIA device nodes (owned by `video` / `render` groups) are
+# accessible. Substitute the __MAXINE_USER__ placeholder at install time.
+TMP="/tmp/$SERVICE"
+cp "$SCRIPT_DIR/$SERVICE" "$TMP"
 MAXINE_USER="${SUDO_USER:-$USER}"
-sed -i "s|__MAXINE_USER__|$MAXINE_USER|g" "$TMP_HP"
-sudo cp "$TMP_HP" /etc/systemd/system/
-rm -f "$TMP_HP"
+sed -i "s|__MAXINE_USER__|$MAXINE_USER|g" "$TMP"
+sudo cp "$TMP" /etc/systemd/system/
+rm -f "$TMP"
 sudo systemctl daemon-reload
-sudo systemctl enable --now "$SERVICE_AR"
-ok "Enabled+started: $SERVICE_AR"
-sudo systemctl enable --now "$SERVICE_HP"
-ok "Enabled+started: $SERVICE_HP (User=$MAXINE_USER)"
+sudo systemctl enable --now "$SERVICE"
+ok "Enabled+started: $SERVICE (User=$MAXINE_USER)"
 
 # ---------------------------------------------------------------------------
 # 8. Summary
@@ -171,8 +170,7 @@ echo ""
 echo "  Select 'MaxineFinal' (/dev/video10) in Zoom, Teams, OBS, Chrome, etc."
 echo ""
 echo "  Logs:"
-echo "    AR SDK:    journalctl -fu $SERVICE_AR"
-echo "    Head-pose: journalctl -fu $SERVICE_HP"
+echo "    journalctl -fu $SERVICE"
 echo ""
 echo "  NOTE: First start ~60 s (LivePortrait torch.compile warmup)."
 echo "============================================"
