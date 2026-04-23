@@ -1,5 +1,5 @@
 [Unit]
-Description=Maxine AR SDK Native Gaze Redirection Webcam
+Description=Stage 1: Maxine AR SDK eye-contact (native) → /dev/video11
 After=docker.service
 Wants=docker.service
 
@@ -36,7 +36,7 @@ ExecStart=/usr/bin/docker run \
     --name maxine-ar-sdk-webcam \
     --gpus all \
     --device /dev/video0 \
-    --device /dev/video10 \
+    --device /dev/video11 \
     -e NVIDIA_VISIBLE_DEVICES=all \
     -e NVIDIA_DRIVER_CAPABILITIES=compute,utility,video \
     -e GAZE_EYE_SIZE=${GAZE_EYE_SIZE} \
@@ -53,7 +53,7 @@ ExecStart=/usr/bin/docker run \
     -e GAZE_HEAD_YAW_LOW=${GAZE_HEAD_YAW_LOW} \
     -e GAZE_HEAD_YAW_HIGH=${GAZE_HEAD_YAW_HIGH} \
     ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest \
-    /usr/local/bin/maxine_ar_webcam --mjpeg /dev/video10 1920 1080
+    /usr/local/bin/maxine_ar_webcam --mjpeg /dev/video11 1920 1080
 
 ExecStop=/usr/bin/docker stop -t 5 maxine-ar-sdk-webcam
 ExecStopPost=-/usr/bin/docker rm -f maxine-ar-sdk-webcam

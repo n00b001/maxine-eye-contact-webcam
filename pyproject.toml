@@ -93,6 +93,7 @@ omit = [
     "eyecontact_pb2_grpc.py",
     "vendor/*",
     "liveportrait_frontalizer.py",
+    "maxine_arsdk_headpose.py",
 ]
 
 [tool.coverage.report]

@@ -1,16 +1,63 @@
-# Maxine Eye Contact – Real-time Webcam Pipeline
+# Maxine Eye Contact + Head Pose – Real-time Webcam Pipeline
 
-Two pipeline options for real-time gaze correction from a physical webcam to a
-virtual V4L2 webcam (`/dev/video10`).
+A chained real-time pipeline that captures from a physical webcam, applies
+**eye-contact gaze redirection** (via the NVIDIA AR SDK) and **head-pose
+correction** (via LivePortrait), and exposes the result as a virtual V4L2
+webcam (`/dev/video10`) for use in Zoom, Teams, Chrome, OBS, etc.
 
-| Pipeline | Latency | Requirements | Best For |
-|----------|---------|--------------|----------|
-| **Native AR SDK (Docker)** | **~33 ms** | NVIDIA GPU, AR SDK | Production, low-latency meetings |
-| **Python NIM (gRPC)** | **~1–2 s** | NVIDIA GPU, NIM container | Quick start, highest quality |
+## Architecture
+
+```
+/dev/video0 (physical webcam, MJPEG)
+   │
+   ▼  ── Stage 1: AR SDK Docker container ───────────────  ~33 ms
+   │    • C++ native, NVIDIA AR SDK nvargazeredirection
+   │    • Reads /dev/video0, writes /dev/video11
+   │
+/dev/video11 (intermediate v4l2loopback)
+   │
+   ▼  ── Stage 2: LivePortrait head-pose (Python) ────────  ~27 ms
+   │    • MediaPipe Face Mesh → LivePortrait generator
+   │    • fp16 + torch.compile on RTX 4090
+   │    • Reads /dev/video11, writes /dev/video10
+   │
+/dev/video10 (final v4l2loopback, seen by Zoom/Teams/etc.)
+```
+
+**End-to-end latency (RTX 4090, 1080p @ 30 fps):** ~65 ms — well inside a
+100 ms budget.
+
+## Quick start
+
+```bash
+# One-time setup (installs deps, pulls image, downloads weights, starts services)
+./setup.sh
+```
+
+That runs everything in order: apt packages, v4l2loopback (2 devices),
+Docker + GHCR image, LivePortrait weights (~630 MB), both systemd units.
+First service start pays a ~60 s `torch.compile` warmup; steady state is
+~27 ms/frame in Stage 2.
+
+Then select **MaxineFinal** as your camera in your video app.
 
 ---
 
-## Native AR SDK Pipeline (Recommended)
+## Legacy pipelines
+
+Two alternative paths are still in the repo for specific situations:
+
+| Path | Latency | When to use |
+|------|---------|-------------|
+| **AR SDK only** (no head-pose) | ~33 ms | If you don't care about head pose and want absolute minimum latency |
+| **Python NIM** (gRPC) | ~1–2 s | No AR SDK licence? Still works via the Maxine NIM container |
+
+These are documented further down under "Native AR SDK Pipeline" and
+"Python NIM Pipeline".
+
+---
+
+## Native AR SDK Pipeline (Stage 1 detail)
 
 A native C++ binary built with the NVIDIA AR SDK (`nvargazeredirection`) runs
 inside a Docker container. It captures frame-by-frame, runs gaze-redirection

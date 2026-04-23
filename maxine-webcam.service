@@ -1,53 +1,31 @@
 [Unit]
-Description=Maxine Eye Contact + Head Pose Correction Webcam Pipeline
-After=network-online.target docker.service
-Wants=network-online.target docker.service
+Description=Stage 2: Maxine head-pose correction (LivePortrait) — /dev/video11 → /dev/video10
+After=network-online.target maxine-ar-sdk-webcam.service
+Wants=network-online.target
+Requires=maxine-ar-sdk-webcam.service
 
 [Service]
 Type=simple
 User=%I
 WorkingDirectory=/opt/maxine-eye-contact-webcam
 
-# --- NGC / NIM auth -------------------------------------------------------
-Environment="NGC_API_KEY_FILE=/etc/nvidia-nim/api.key"
-Environment="PYTHONUNBUFFERED=1"
-
-# --- Eye contact (NIM) tuning --------------------------------------------
-# Edit via `sudo systemctl edit maxine-webcam --full`, then
-# `sudo systemctl restart maxine-webcam`. See README for descriptions.
-Environment="NIM_TARGET=127.0.0.1:8003"
-Environment="RESOLUTION=720p"
+# Edit via `sudo systemctl edit maxine-webcam --full`.
+# Combined with maxine-ar-sdk-webcam, end-to-end latency is ~60 ms:
+# ~33 ms AR SDK gaze + ~25 ms LivePortrait head-pose + kernel v4l2 hops.
+Environment="INPUT_DEVICE=/dev/video11"
+Environment="OUTPUT_DEVICE=/dev/video10"
+Environment="RESOLUTION=1080p"
 Environment="FPS=30"
-Environment="GOP=30"
-Environment="EYE_SIZE=4"
-Environment="TEMPORAL=0xFFFFFFFF"
-Environment="DETECT_CLOSURE=0"
-Environment="BITRATE=8M"
-Environment="NVENC=0"
-
-# --- Head pose correction --------------------------------------------------
-# HEAD_POSE=1 enables head-pose correction after the NIM gaze redirection.
-# HEAD_POSE_ENGINE selects the backend:
-#   geometric    — MediaPipe + affine warp, CPU, ~5 ms/frame, roll-only
-#                   effective (yaw/pitch need 3D reconstruction they can't
-#                   synthesise). Requires `mediapipe` in the venv.
-#   liveportrait — LivePortrait generative net, GPU, ~37 ms/frame on RTX
-#                   4090, genuinely rotates the head in 3D. Requires
-#                   vendor/LivePortrait + `uv sync --extra liveportrait`.
-# See README "Head Pose Correction" for setup commands.
 Environment="HEAD_POSE=1"
 Environment="HEAD_POSE_ENGINE=liveportrait"
 Environment="HEAD_POSE_STRENGTH=1.0"
 Environment="HEAD_POSE_YAW_LIMIT=45.0"
-Environment="HEAD_POSE_COMPILE=0"
-
-# --- Device paths ---------------------------------------------------------
-Environment="INPUT_DEVICE=/dev/video0"
-Environment="OUTPUT_DEVICE=/dev/video10"
+Environment="HEAD_POSE_COMPILE=1"
+Environment="PYTHONUNBUFFERED=1"
 
 ExecStart=/usr/bin/env bash -c 'export PATH="$HOME/.local/bin:$PATH" && \
     cd /opt/maxine-eye-contact-webcam && \
-    uv run python maxine_webcam_pipeline.py'
+    uv run python maxine_arsdk_headpose.py'
 
 Restart=on-failure
 RestartSec=5
