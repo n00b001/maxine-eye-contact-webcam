@@ -64,3 +64,8 @@ Thumbs.db
 *.crt
 secrets/
 credentials/
+# FasterLivePortrait — large model weights, not versioned
+vendor/FasterLivePortrait/checkpoints/
+vendor/FasterLivePortrait/results/
+vendor/FasterLivePortrait/temp/
+
