@@ -122,6 +122,30 @@ The gaze redirection behavior can be customized via **environment variables** (p
 | `GAZE_HEAD_YAW_LOW` | `10.0` | `10.0`–`35.0` | Lower head-pose yaw threshold (°). |
 | `GAZE_HEAD_YAW_HIGH` | `35.0` | `10.0`–`35.0` | Upper head-pose yaw threshold (°). |
 
+#### Head Pose Correction
+
+The Python NIM pipeline supports optional real-time head pose correction that rotates the head to face the camera. This is useful when the user is looking significantly off-center.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--head-pose` | (unset) | Enable head pose correction |
+| `--head-pose-strength` | `1.0` | Correction strength (0.0–1.0) |
+| `--head-pose-yaw-limit` | `45.0` | Maximum yaw (°) to correct beyond which the frame is passed through |
+
+**Example:**
+
+```bash
+uv run python maxine_webcam_pipeline.py --head-pose --head-pose-strength 0.8 --resolution 480p
+```
+
+**Requirements:** Install the optional `mediapipe` dependency:
+
+```bash
+uv add mediapipe
+```
+
+**Performance note:** Adds approximately 10–20 ms per frame on CPU (MediaPipe Face Mesh dominates).
+
 **How thresholds work:** Between `*Low` and `*High`, the redirected gaze linearly transitions from full camera-facing to estimated natural gaze. Above the high threshold, no redirection is applied.
 
 **To change parameters:**
@@ -299,6 +323,9 @@ cd maxine-eye-contact-webcam
 uv python install 3.12
 uv python pin 3.12
 uv sync
+
+# Optional: install mediapipe for head pose correction
+uv add mediapipe
 ```
 
 #### 5. Build protobuf definitions
@@ -368,6 +395,9 @@ Select **"MaxineEyeContact"** as your camera in Zoom, Teams, OBS, Chrome, etc.
 | `--eye-size` | `4` | Eye size sensitivity (2–6) |
 | `--no-camera-controls` | (unset) | Skip `v4l2-ctl` setup |
 | `--dry-run` | (unset) | Bypass NIM (test only) |
+| `--head-pose` | (unset) | Enable optional head-pose correction (requires `mediapipe`) |
+| `--head-pose-strength` | `1.0` | Head-pose correction strength (0.0–1.0) |
+| `--head-pose-yaw-limit` | `45.0` | Disable correction when yaw exceeds this angle (°) |
 
 ### Systemd Auto-Start (Python NIM)
 
@@ -411,6 +441,46 @@ Switch to 480p for stable operation, or migrate to the **Native AR SDK (Docker)*
 - Verify NIM container is running: `docker logs maxine-eye-contact-nim`
 - Check port mapping: your NIM exposes 8001 internally, mapped to 8003 on host
 - Test connectivity: `grpcurl --plaintext localhost:8003 grpc.health.v1.Health/Check`
+
+---
+
+## Development
+
+### Local setup
+```bash
+uv sync --all-groups          # install runtime + dev deps
+```
+
+This project uses `core.hooksPath=scripts/` so the hooks in `scripts/pre-commit` and `scripts/pre-push` run automatically — no extra install step. Verify they are executable:
+
+```bash
+chmod +x scripts/pre-commit scripts/pre-push
+```
+
+### Checks that must pass
+
+| Stage | Command | What it runs |
+|-------|---------|--------------|
+| Local / pre-commit | `scripts/pre-commit` | `ruff check`, `ruff format --check`, `pytest --cov --cov-fail-under=80` |
+| Local / pre-push | `scripts/pre-push` | `pytest --cov --cov-fail-under=80` |
+| GitHub Actions | `.github/workflows/python-ci.yml` | same ruff + pytest coverage gate |
+
+### Running individual checks
+
+```bash
+uv run ruff check .                    # lint
+uv run ruff format .                   # auto-format
+uv run pytest                          # tests
+uv run pytest --cov --cov-fail-under=80  # tests with coverage gate
+```
+
+### Adding dependencies
+
+Use `uv add <package>` (runtime) or `uv add --group dev <package>` (dev only). Never use `pip` directly. See `PROJECT_RULES.md` for the full ruleset.
+
+### Implementation notes
+
+The shipped head-pose correction is a lightweight geometric approximation (MediaPipe Face Mesh → OpenCV `solvePnP` → affine warp + alpha blend). It runs on CPU in ~10–20 ms/frame. The original design doc in `plans/head-pose-correction-plan.md` explores a higher-quality LivePortrait (GPU, ~78 FPS on RTX 4090) path as a future upgrade.
 
 ---
 

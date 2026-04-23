@@ -24,14 +24,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import queue
 import signal
 import subprocess
-import sys
 import threading
 import time
-from typing import Iterator, Optional
+from collections.abc import Iterator
 
 import cv2
 import grpc
@@ -43,6 +43,19 @@ try:
 except ImportError as exc:
     print("ERROR: Protobuf stubs not found. Run ./build_proto.sh first.")
     raise SystemExit(1) from exc
+
+# Optional head-pose correction (requires mediapipe)
+try:
+    from frontalizer import Frontalizer
+    from head_pose_estimator import HeadPoseEstimator
+except ImportError as exc:
+    HeadPoseEstimator = None  # type: ignore[misc,assignment]
+    Frontalizer = None  # type: ignore[misc,assignment]
+    print(
+        "WARNING: head_pose_estimator/frontalizer not available "
+        "(install mediapipe to enable --head-pose):",
+        exc,
+    )
 
 # ---------------------------------------------------------------------------
 # Global shutdown handling
@@ -61,8 +74,10 @@ signal.signal(signal.SIGTERM, _handle_signal)
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _run_ffmpeg(args: list[str], stdin: bytes | None = None,
-                timeout: float = 30.0) -> tuple[bytes, bytes, int]:
+
+def _run_ffmpeg(
+    args: list[str], stdin: bytes | None = None, timeout: float = 30.0
+) -> tuple[bytes, bytes, int]:
     """Run FFmpeg and return (stdout, stderr, returncode)."""
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"] + args
     proc = subprocess.Popen(
@@ -99,28 +114,47 @@ def encode_gop_to_mp4(
     # Build encoder args
     if use_nvenc:
         enc = [
-            "-c:v", "h264_nvenc",
-            "-preset", "p1",          # fastest
-            "-tune", "ull",           # ultra-low-latency
-            "-rc", "cbr",
-            "-b:v", bitrate,
-            "-bufsize", "4M",
-            "-profile:v", "main",
-            "-g", str(gop),
-            "-bf", "0",
-            "-pix_fmt", "yuv420p",
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            "p1",  # fastest
+            "-tune",
+            "ull",  # ultra-low-latency
+            "-rc",
+            "cbr",
+            "-b:v",
+            bitrate,
+            "-bufsize",
+            "4M",
+            "-profile:v",
+            "main",
+            "-g",
+            str(gop),
+            "-bf",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
         ]
     else:
         enc = [
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-tune", "zerolatency",
-            "-b:v", bitrate,
-            "-bufsize", "4M",
-            "-profile:v", "baseline",
-            "-g", str(gop),
-            "-bf", "0",
-            "-pix_fmt", "yuv420p",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-b:v",
+            bitrate,
+            "-bufsize",
+            "4M",
+            "-profile:v",
+            "baseline",
+            "-g",
+            str(gop),
+            "-bf",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
         ]
 
     flat = b"".join(f.tobytes() for f in frames)
@@ -130,10 +164,19 @@ def encode_gop_to_mp4(
 
     try:
         cmd = [
-            "-f", "rawvideo", "-pix_fmt", "bgr24",
-            "-s", f"{w}x{h}", "-r", str(fps), "-i", "-",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "-s",
+            f"{w}x{h}",
+            "-r",
+            str(fps),
+            "-i",
+            "-",
             *enc,
-            "-movflags", "+faststart",
+            "-movflags",
+            "+faststart",
             tmp_path,
         ]
         stdout, stderr, rc = _run_ffmpeg(cmd, stdin=flat, timeout=60.0)
@@ -144,10 +187,8 @@ def encode_gop_to_mp4(
         with open(tmp_path, "rb") as f:
             return f.read()
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp_path)
-        except OSError:
-            pass
 
 
 def decode_mp4_to_frames(mp4_data: bytes, shape: tuple[int, int]) -> list[np.ndarray]:
@@ -176,28 +217,26 @@ def decode_mp4_to_frames(mp4_data: bytes, shape: tuple[int, int]) -> list[np.nda
         cap.release()
         return frames
     except Exception as exc:
-        raise RuntimeError(f"OpenCV decode failed: {exc}")
+        raise RuntimeError(f"OpenCV decode failed: {exc}") from exc
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp_path)
-        except OSError:
-            pass
 
 
 # ---------------------------------------------------------------------------
 # Threads
 # ---------------------------------------------------------------------------
 
+
 def _set_camera_controls(device: str) -> None:
     """Disable exposure_dynamic_framerate to maintain constant FPS."""
-    try:
+    with contextlib.suppress(Exception):
         subprocess.run(
-            ["v4l2-ctl", "-d", device,
-             "--set-ctrl=exposure_dynamic_framerate=0"],
-            capture_output=True, check=False, timeout=5,
+            ["v4l2-ctl", "-d", device, "--set-ctrl=exposure_dynamic_framerate=0"],
+            capture_output=True,
+            check=False,
+            timeout=5,
         )
-    except Exception:
-        pass
 
 
 def capture_thread(
@@ -242,8 +281,9 @@ def capture_thread(
     actual_fps = cap.get(cv2.CAP_PROP_FPS)
     fourcc = int(cap.get(cv2.CAP_PROP_FOURCC))
     fourcc_str = "".join(chr((fourcc >> (8 * i)) & 0xFF) for i in range(4))
-    print(f"[Capture] {actual_w}x{actual_h} @ {actual_fps:.1f} fps  "
-          f"fmt={fourcc_str}  device={device}")
+    print(
+        f"[Capture] {actual_w}x{actual_h} @ {actual_fps:.1f} fps  fmt={fourcc_str}  device={device}"
+    )
 
     dropped = 0
     while not _shutdown.is_set():
@@ -254,8 +294,7 @@ def capture_thread(
 
         # Resize if the camera gave us something else
         if frame.shape[1] != width or frame.shape[0] != height:
-            frame = cv2.resize(frame, (width, height),
-                               interpolation=cv2.INTER_LINEAR)
+            frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_LINEAR)
 
         if q.full():
             try:
@@ -283,15 +322,21 @@ def nim_pipeline_thread(
     use_nvenc: bool = False,
     bitrate: str = "8M",
     dry_run: bool = False,
+    head_pose: bool = False,
+    head_pose_strength: float = 1.0,
+    head_pose_yaw_limit: float = 45.0,
 ) -> None:
     """
     Collect GOPs from *raw_q*, encode → NIM → decode, push to *out_q*.
     """
-    print(f"[Pipeline] GOP={gop_size}, NVENC={'yes' if use_nvenc else 'no'}, "
-          f"dry_run={'yes' if dry_run else 'no'}")
+    print(
+        f"[Pipeline] GOP={gop_size}, NVENC={'yes' if use_nvenc else 'no'}, "
+        f"dry_run={'yes' if dry_run else 'no'}, "
+        f"head_pose={'yes' if head_pose else 'no'}"
+    )
 
-    channel: Optional[grpc.Channel] = None
-    stub: Optional[eyecontact_pb2_grpc.MaxineEyeContactServiceStub] = None
+    channel: grpc.Channel | None = None
+    stub: eyecontact_pb2_grpc.MaxineEyeContactServiceStub | None = None
 
     if not dry_run:
         channel = grpc.insecure_channel(
@@ -303,6 +348,24 @@ def nim_pipeline_thread(
         )
         stub = eyecontact_pb2_grpc.MaxineEyeContactServiceStub(channel)
         print(f"[Pipeline] gRPC channel -> {grpc_target}")
+
+    # Optional head-pose corrector (initialised once per thread)
+    hpe: HeadPoseEstimator | None = None
+    frontalizer: Frontalizer | None = None
+    if head_pose:
+        if HeadPoseEstimator is None or Frontalizer is None:
+            print(
+                "[Pipeline] WARNING: --head-pose requested but modules not available; "
+                "passing frames through unchanged"
+            )
+            head_pose = False
+        else:
+            hpe = HeadPoseEstimator(static_image_mode=False)
+            frontalizer = Frontalizer(output_size=(256, 256), strength=head_pose_strength)
+            print(
+                f"[Pipeline] Head-pose corrector initialised "
+                f"(strength={head_pose_strength}, yaw_limit={head_pose_yaw_limit})"
+            )
 
     gop_idx = 0
     while not _shutdown.is_set():
@@ -322,37 +385,42 @@ def nim_pipeline_thread(
         if dry_run:
             for f in frames:
                 if out_q.full():
-                    try:
+                    with contextlib.suppress(queue.Empty):
                         out_q.get_nowait()
-                    except queue.Empty:
-                        pass
                 out_q.put(f)
             gop_idx += 1
-            print(f"[Pipeline] GOP {gop_idx:03d}: {len(frames)} frames  "
-                  f"collect={t_collect:.2f}s  (dry-run)")
+            print(
+                f"[Pipeline] GOP {gop_idx:03d}: {len(frames)} frames  "
+                f"collect={t_collect:.2f}s  (dry-run)"
+            )
             continue
 
         # Encode
         t_enc0 = time.monotonic()
         try:
             mp4_data = encode_gop_to_mp4(
-                frames, fps, use_nvenc=use_nvenc,
-                bitrate=bitrate, gop_size=gop_size,
+                frames,
+                fps,
+                use_nvenc=use_nvenc,
+                bitrate=bitrate,
+                gop_size=gop_size,
             )
         except RuntimeError as exc:
             print(f"[Pipeline] Encode error: {exc}")
             continue
         t_enc = time.monotonic() - t_enc0
 
-        # gRPC
-        def _make_requests() -> Iterator[eyecontact_pb2.RedirectGazeRequest]:
-            yield eyecontact_pb2.RedirectGazeRequest(config=config)
+        # gRPC — bind loop variables via default args so the generator
+        # captures the values at closure-creation time (ruff B023).
+        def _make_requests(
+            data: bytes = mp4_data,
+            cfg: eyecontact_pb2.RedirectGazeConfig = config,
+        ) -> Iterator[eyecontact_pb2.RedirectGazeRequest]:
+            yield eyecontact_pb2.RedirectGazeRequest(config=cfg)
             chunk = 64 * 1024
-            for i in range(0, len(mp4_data), chunk):
-                yield eyecontact_pb2.RedirectGazeRequest(
-                    video_file_data=mp4_data[i : i + chunk]
-                )
-            print(f"[Pipeline] Sent {len(mp4_data)} bytes to NIM")
+            for i in range(0, len(data), chunk):
+                yield eyecontact_pb2.RedirectGazeRequest(video_file_data=data[i : i + chunk])
+            print(f"[Pipeline] Sent {len(data)} bytes to NIM")
 
         t_nim0 = time.monotonic()
         response_data = b""
@@ -366,7 +434,7 @@ def nim_pipeline_thread(
                 if resp.HasField("video_file_data"):
                     response_data += resp.video_file_data
                 elif resp.HasField("keepalive"):
-                    print(f"[Pipeline] Keepalive received")
+                    print("[Pipeline] Keepalive received")
                     continue
         except grpc.RpcError as exc:
             print(f"[Pipeline] gRPC error: {exc.code()}: {exc.details()}")
@@ -385,13 +453,38 @@ def nim_pipeline_thread(
             continue
         t_dec = time.monotonic() - t_dec0
 
+        # Optional head-pose correction (single MediaPipe pass per frame).
+        t_hp = 0.0
+        if head_pose and hpe is not None and frontalizer is not None:
+            t_hp0 = time.monotonic()
+            corrected: list[np.ndarray] = []
+            for frame in out_frames:
+                try:
+                    landmarks = hpe.get_landmarks(frame)
+                    if landmarks is not None:
+                        pose = hpe.estimate_from_landmarks(landmarks, frame.shape[:2])
+                        if pose is not None:
+                            pitch, yaw, roll = pose
+                            if abs(yaw) < head_pose_yaw_limit:
+                                warped = frontalizer.frontalize(frame, landmarks, pitch, yaw, roll)
+                                if warped is not None:
+                                    x_min, y_min = landmarks.min(axis=0).astype(int)
+                                    x_max, y_max = landmarks.max(axis=0).astype(int)
+                                    face_rect = (x_min, y_min, x_max - x_min, y_max - y_min)
+                                    frame = frontalizer.blend_back(frame, warped, face_rect)
+                except Exception as exc:
+                    print(f"[Pipeline] Head-pose correction warning: {exc}")
+                corrected.append(frame)
+            out_frames = corrected
+            t_hp = time.monotonic() - t_hp0
+
         gop_idx += 1
-        latency = t_collect + t_enc + t_nim + t_dec
+        latency = t_collect + t_enc + t_nim + t_dec + t_hp
         print(
             f"[Pipeline] GOP {gop_idx:03d}: "
             f"collect={t_collect:.2f}s  encode={t_enc:.2f}s  "
             f"nim={t_nim:.2f}s  decode={t_dec:.2f}s  "
-            f"latency≈{latency:.2f}s  "
+            f"hp={t_hp:.2f}s  latency≈{latency:.2f}s  "
             f"in={len(frames)} out={len(out_frames)}"
         )
 
@@ -400,12 +493,12 @@ def nim_pipeline_thread(
 
         for f in out_frames:
             if out_q.full():
-                try:
+                with contextlib.suppress(queue.Empty):
                     out_q.get_nowait()
-                except queue.Empty:
-                    pass
             out_q.put(f)
 
+    if hpe is not None:
+        hpe.close()
     if channel:
         channel.close()
     print("[Pipeline] Exited")
@@ -424,18 +517,31 @@ def output_thread(
     if not device:
         print("[Output] No output device specified – frames will be discarded")
         while not _shutdown.is_set():
-            try:
+            with contextlib.suppress(queue.Empty):
                 q.get(timeout=1.0)
-            except queue.Empty:
-                pass
         print("[Output] Exited")
         return
 
     cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-        "-f", "rawvideo", "-pix_fmt", "bgr24",
-        "-s", f"{width}x{height}", "-r", str(fps), "-i", "-",
-        "-f", "v4l2", "-pix_fmt", "yuv420p",
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "bgr24",
+        "-s",
+        f"{width}x{height}",
+        "-r",
+        str(fps),
+        "-i",
+        "-",
+        "-f",
+        "v4l2",
+        "-pix_fmt",
+        "yuv420p",
         device,
     ]
     proc = subprocess.Popen(
@@ -447,7 +553,7 @@ def output_thread(
     print(f"[Output] {width}x{height}@{fps:.0f} → {device}")
 
     frame_interval = 1.0 / fps
-    next_time: Optional[float] = None
+    next_time: float | None = None
     frame_idx = 0
 
     while not _shutdown.is_set():
@@ -497,47 +603,78 @@ def output_thread(
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        description="Real-time Maxine Eye Contact via NIM + v4l2loopback"
+    p = argparse.ArgumentParser(description="Real-time Maxine Eye Contact via NIM + v4l2loopback")
+    p.add_argument(
+        "--input", default="/dev/video0", help="V4L2 webcam device (default: /dev/video0)"
     )
-    p.add_argument("--input", default="/dev/video0",
-                   help="V4L2 webcam device (default: /dev/video0)")
-    p.add_argument("--output", default="/dev/video10",
-                   help="v4l2loopback output device (default: /dev/video10)")
-    p.add_argument("--resolution", default="720p",
-                   choices=["480p", "720p", "1080p"],
-                   help="Preset resolution: 480p, 720p, 1080p (default: 720p)")
-    p.add_argument("--width", type=int, default=None,
-                   help="Override capture width")
-    p.add_argument("--height", type=int, default=None,
-                   help="Override capture height")
-    p.add_argument("--fps", type=float, default=30.0,
-                   help="Target frame-rate (default: 30)")
-    p.add_argument("--gop", type=int, default=30,
-                   help="GOP size (frames per NIM request, default: 30)")
-    p.add_argument("--nim", default="127.0.0.1:8003",
-                   help="gRPC target (default: 127.0.0.1:8003)")
-    p.add_argument("--nvenc", action="store_true",
-                   help="Use NVENC instead of libx264 for encoding")
-    p.add_argument("--bitrate", default="8M",
-                   help="Video bitrate (default: 8M)")
-    p.add_argument("--temporal", type=lambda s: int(s, 0), default=0xFFFFFFFF,
-                   help="NIM temporal smoothing (default: 0xFFFFFFFF)")
-    p.add_argument("--detect-closure", type=lambda s: int(s, 0), default=0,
-                   help="NIM detect_closure (default: 0)")
-    p.add_argument("--eye-size", type=lambda s: int(s, 0), default=4,
-                   help="NIM eye_size_sensitivity, 2-6 (default: 4)")
-    p.add_argument("--mode", type=lambda s: int(s, 0), default=0,
-                   help="DEPRECATED")
-    p.add_argument("--quality", type=lambda s: int(s, 0), default=0,
-                   help="DEPRECATED")
-    p.add_argument("--no-camera-controls", action="store_true",
-                   help="Skip v4l2-ctl camera setup")
-    p.add_argument("--dry-run", action="store_true",
-                   help="Skip NIM; pass frames straight through (test capture/output)")
-    p.add_argument("--show", action="store_true",
-                   help="Show local preview window (requires GUI OpenCV)")
+    p.add_argument(
+        "--output",
+        default="/dev/video10",
+        help="v4l2loopback output device (default: /dev/video10)",
+    )
+    p.add_argument(
+        "--resolution",
+        default="720p",
+        choices=["480p", "720p", "1080p"],
+        help="Preset resolution: 480p, 720p, 1080p (default: 720p)",
+    )
+    p.add_argument("--width", type=int, default=None, help="Override capture width")
+    p.add_argument("--height", type=int, default=None, help="Override capture height")
+    p.add_argument("--fps", type=float, default=30.0, help="Target frame-rate (default: 30)")
+    p.add_argument(
+        "--gop", type=int, default=30, help="GOP size (frames per NIM request, default: 30)"
+    )
+    p.add_argument("--nim", default="127.0.0.1:8003", help="gRPC target (default: 127.0.0.1:8003)")
+    p.add_argument("--nvenc", action="store_true", help="Use NVENC instead of libx264 for encoding")
+    p.add_argument("--bitrate", default="8M", help="Video bitrate (default: 8M)")
+    p.add_argument(
+        "--temporal",
+        type=lambda s: int(s, 0),
+        default=0xFFFFFFFF,
+        help="NIM temporal smoothing (default: 0xFFFFFFFF)",
+    )
+    p.add_argument(
+        "--detect-closure",
+        type=lambda s: int(s, 0),
+        default=0,
+        help="NIM detect_closure (default: 0)",
+    )
+    p.add_argument(
+        "--eye-size",
+        type=lambda s: int(s, 0),
+        default=4,
+        help="NIM eye_size_sensitivity, 2-6 (default: 4)",
+    )
+    p.add_argument("--mode", type=lambda s: int(s, 0), default=0, help="DEPRECATED")
+    p.add_argument("--quality", type=lambda s: int(s, 0), default=0, help="DEPRECATED")
+    p.add_argument("--no-camera-controls", action="store_true", help="Skip v4l2-ctl camera setup")
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Skip NIM; pass frames straight through (test capture/output)",
+    )
+    p.add_argument(
+        "--show", action="store_true", help="Show local preview window (requires GUI OpenCV)"
+    )
+    p.add_argument(
+        "--head-pose",
+        action="store_true",
+        help="Enable head-pose correction after NIM gaze redirection",
+    )
+    p.add_argument(
+        "--head-pose-strength",
+        type=float,
+        default=1.0,
+        help="Head-pose correction strength: 0.0=no correction, 1.0=full (default: 1.0)",
+    )
+    p.add_argument(
+        "--head-pose-yaw-limit",
+        type=float,
+        default=45.0,
+        help="Disable correction when yaw exceeds this angle in degrees (default: 45.0)",
+    )
     return p
 
 
@@ -578,13 +715,20 @@ def main() -> None:
         threading.Thread(
             target=nim_pipeline_thread,
             args=(
-                args.nim, config, args.gop, args.fps,
-                raw_q, out_q,
+                args.nim,
+                config,
+                args.gop,
+                args.fps,
+                raw_q,
+                out_q,
             ),
             kwargs={
                 "use_nvenc": args.nvenc,
                 "bitrate": args.bitrate,
                 "dry_run": args.dry_run,
+                "head_pose": args.head_pose,
+                "head_pose_strength": args.head_pose_strength,
+                "head_pose_yaw_limit": args.head_pose_yaw_limit,
             },
             daemon=True,
         ),
