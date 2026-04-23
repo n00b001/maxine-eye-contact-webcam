@@ -1,15 +1,89 @@
 [Unit]
-Description=Maxine Eye Contact Webcam Pipeline
-After=network-online.target docker.service
-Wants=network-online.target docker.service
+Description=Maxine Eye Contact + Head Pose Correction Webcam
+Documentation=https://github.com/n00b001/maxine-eye-contact-webcam
+After=docker.service network-online.target
+Wants=docker.service network-online.target
 
 [Service]
 Type=simple
-User=%I
-Environment="NGC_API_KEY_FILE=/etc/nvidia-nim/api.key"
-Environment="PYTHONUNBUFFERED=1"
+User=__MAXINE_USER__
 WorkingDirectory=/opt/maxine-eye-contact-webcam
-ExecStart=/usr/bin/env bash -c 'export PATH="$HOME/.local/bin:$PATH" && cd /opt/maxine-eye-contact-webcam && uv run python maxine_webcam_pipeline.py --nim 127.0.0.1:8003 --input /dev/video0 --output /dev/video10 --resolution 720p --fps 30'
+TimeoutStartSec=300
+
+# --- Eye-contact (AR SDK Docker) tuning --------------------------------------
+# Forwarded into the AR SDK container by maxine_arsdk_headpose.py.
+# See README "Tunable Gaze Parameters" for ranges.
+Environment="GAZE_EYE_SIZE=2"
+Environment="GAZE_LANDMARKS=126"
+Environment="GAZE_NO_REDIRECT=0"
+Environment="GAZE_NO_STABILIZE=0"
+Environment="GAZE_NO_CUDA_GRAPH=0"
+Environment="GAZE_PITCH_LOW=10.0"
+Environment="GAZE_PITCH_HIGH=35.0"
+Environment="GAZE_YAW_LOW=10.0"
+Environment="GAZE_YAW_HIGH=35.0"
+Environment="GAZE_HEAD_PITCH_LOW=10.0"
+Environment="GAZE_HEAD_PITCH_HIGH=35.0"
+Environment="GAZE_HEAD_YAW_LOW=10.0"
+Environment="GAZE_HEAD_YAW_HIGH=35.0"
+
+# --- Head-pose (LivePortrait) tuning -----------------------------------------
+Environment="HEAD_POSE=1"
+Environment="HEAD_POSE_ENGINE=liveportrait"
+# Overall strength — per-axis _STRENGTH overrides below fall back to this.
+Environment="HEAD_POSE_STRENGTH=1.0"
+# Per-axis strength (1.0 = zero that axis = fully correct; 0.0 = preserve
+# source rotation on that axis = disable correction for that axis). Roll
+# defaults to 0.0 because forcing roll=0 looks uncanny on a webcam feed —
+# natural micro-tilt reads as "alive". Flip to 1.0 to level the head.
+Environment="HEAD_POSE_PITCH_STRENGTH=1.0"
+Environment="HEAD_POSE_YAW_STRENGTH=1.0"
+Environment="HEAD_POSE_ROLL_STRENGTH=0.0"
+# Per-axis skip limit (degrees). If |angle| exceeds the limit on ANY axis
+# the frame passes through uncorrected — LP produces uncanny warps at
+# extreme rotations. Raise a limit if you want correction at more extreme
+# angles (at the cost of occasional glitches).
+Environment="HEAD_POSE_PITCH_LIMIT=45.0"
+Environment="HEAD_POSE_YAW_LIMIT=45.0"
+Environment="HEAD_POSE_ROLL_LIMIT=45.0"
+Environment="HEAD_POSE_COMPILE=1"
+
+# --- Pipeline ----------------------------------------------------------------
+# Stage ordering: HEAD POSE FIRST, then EYE CONTACT.
+#   /dev/video0 → Python LivePortrait head-pose → /dev/video11 → AR SDK
+#   gaze redirection → /dev/video10 → Zoom/Teams/Chrome.
+# Running gaze first would aim the eyes at the camera, and the subsequent
+# head-pose rotation would then send them off-axis again.
+Environment="INPUT_DEVICE=/dev/video0"
+Environment="OUTPUT_DEVICE=/dev/video11"
+Environment="FINAL_OUTPUT=/dev/video10"
+# Camera MJPEG sustains 30 fps at 1080p over USB 2.0; raw YUYV caps at 2 fps.
+Environment="INPUT_FORMAT=mjpeg"
+# YUYV422 is what the AR SDK binary expects from its camera input.
+Environment="OUTPUT_FORMAT=yuyv422"
+Environment="RESOLUTION=1080p"
+Environment="FPS=30"
+Environment="START_ARSDK=1"
+Environment="ARSDK_CONTAINER_NAME=maxine-arsdk"
+Environment="ARSDK_IMAGE=ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest"
+Environment="PYTHONUNBUFFERED=1"
+
+# Prep: cached pull (no-op if up to date) + clean stale container + disable
+# Logitech-style low-light frame-rate drop so the camera stays at 30 fps.
+ExecStartPre=-/usr/bin/docker pull ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest
+ExecStartPre=-/usr/bin/docker rm -f maxine-arsdk
+ExecStartPre=-/usr/bin/v4l2-ctl -d /dev/video0 --set-ctrl=exposure_dynamic_framerate=0
+
+# One Python process owns everything: it spawns the AR SDK Docker container
+# as a child, pipes its stdout/stderr into this journal, reads the corrected
+# frames from /dev/video11, runs LivePortrait head-pose, and writes the final
+# stream to /dev/video10.
+ExecStart=/usr/bin/env bash -c 'export PATH="$HOME/.local/bin:$PATH" && cd /opt/maxine-eye-contact-webcam && exec uv run python maxine_arsdk_headpose.py'
+
+# Defence in depth: if the Python process ever dies without cleaning up, kill
+# the AR SDK container here too so the next start doesn't hit a name clash.
+ExecStopPost=-/usr/bin/docker rm -f maxine-arsdk
+
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+    paths-ignore:
+      - '**.md'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
   workflow_dispatch:
     inputs:
       tag:
@@ -17,7 +23,32 @@ env:
   BASE_IMAGE: ghcr.io/${{ github.repository }}/arsdk-base:latest
 
 jobs:
+  lint-test:
+    # Mirrors scripts/pre-commit and scripts/pre-push: ruff check,
+    # ruff format check, and pytest with the 80% coverage gate.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.x"
+      - name: Install dependencies
+        run: uv sync --all-groups
+      - name: Run ruff check (pre-commit parity)
+        run: uv run ruff check .
+      - name: Run ruff format --check (pre-commit parity)
+        run: uv run ruff format --check .
+      - name: Run pytest with coverage (pre-commit + pre-push parity)
+        run: uv run pytest --cov --cov-report=xml --cov-fail-under=80
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+
   build-and-push:
+    needs: lint-test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -44,7 +75,7 @@ jobs:
           echo "Checking base image: ${BASE_IMAGE}"
           if ! docker buildx imagetools inspect "${BASE_IMAGE}" > /dev/null 2>&1; then
             echo ""
-            echo "❌ Base image not found or not accessible: ${BASE_IMAGE}"
+            echo "Base image not found or not accessible: ${BASE_IMAGE}"
             echo ""
             echo "The NVIDIA ARSDK is proprietary and cannot be committed to this public repo."
             echo "You must build and push the base image once from a machine with ARSDK:"
@@ -52,11 +83,11 @@ jobs:
             echo "  ./scripts/push-arsdk-base.sh latest"
             echo ""
             echo "If the image exists but is private, add a GHCR_PAT secret with 'read:packages' scope."
-            echo "See README.md → 'GitHub Actions CI / GHCR Publishing' for details."
+            echo "See README.md -> 'GitHub Actions CI / GHCR Publishing' for details."
             echo ""
             exit 1
           fi
-          echo "✅ Base image found: ${BASE_IMAGE}"
+          echo "Base image found: ${BASE_IMAGE}"
 
       - name: Extract metadata
         id: meta

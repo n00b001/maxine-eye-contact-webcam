@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Running pre-push checks..."
+
+# Run pytest with coverage and fail if under 80%
+uv run pytest --cov --cov-fail-under=80
+
+echo "Pre-push checks passed."
