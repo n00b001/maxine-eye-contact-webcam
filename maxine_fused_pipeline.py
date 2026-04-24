@@ -369,6 +369,26 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
                 pass
             else:
                 # --------------------------------------------------------
+                # FLP paste-back follows the SOURCE PORTRAIT's native size
+                # (after internal resize_to_limit), not the webcam frame
+                # size. When --src-image is 740x576 but --width/--height
+                # are 1920x1080, flt.shape = (576, 740, 3) and the SDK,
+                # which was allocated at 1920x1080, rejects the pointer
+                # with "AR SDK Run: invalid argument". Upscale (bilinear,
+                # on-stream) so the gaze input matches the allocated size.
+                # --------------------------------------------------------
+                if flt.shape[0] != height or flt.shape[1] != width:
+                    # (H, W, 3) -> (1, 3, H, W) for interpolate, then back.
+                    flt_nchw = flt.permute(2, 0, 1).unsqueeze(0)
+                    flt_nchw = torch.nn.functional.interpolate(
+                        flt_nchw,
+                        size=(height, width),
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+                    flt = flt_nchw.squeeze(0).permute(1, 2, 0)
+
+                # --------------------------------------------------------
                 # Step 3: RGB float32 HWC -> BGR uint8 HWC, on-stream.
                 #
                 # flt shape: (H, W, 3), float32, RGB, values in [0, 255].
