@@ -91,6 +91,59 @@ _flp_pipe_mod.paste_back_pytorch = _intercepting_paste_back
 
 
 # ---------------------------------------------------------------------------
+# Motion-smoothing: EMA-blend FLP's motion_extractor output across frames.
+#
+# FLP's motion_extractor produces slightly different (pitch, yaw, roll, t,
+# exp, scale, kp) values every frame even for a completely static input
+# face. The jitter amplifies through warping_spade into visible shimmer on
+# the frontalized output. A cheap fix is to exponentially-weight the
+# current frame's motion against the previous frame's.
+#
+# MAXINE_FLP_MOTION_EMA env var: 1.0 = smoothing off (raw FLP output),
+# 0.3 default = ~65 ms half-response at 30 fps (stable but responsive),
+# 0.1 = very smooth but noticeably laggy.
+# ---------------------------------------------------------------------------
+
+_motion_prev: list = [None]
+
+
+def _reset_motion_smoothing() -> None:
+    _motion_prev[0] = None
+
+
+def _install_motion_smoothing(pipe, alpha: float) -> None:
+    """Monkey-patch motion_extractor.predict to EMA-smooth its outputs."""
+    if alpha >= 1.0:
+        return
+    ex = pipe.model_dict.get("motion_extractor") if hasattr(pipe, "model_dict") else None
+    if ex is None:
+        logger.warning("No motion_extractor in pipe.model_dict; skipping smoothing")
+        return
+    if getattr(ex, "_smoothed", False):
+        return
+    original = ex.predict
+
+    def smoothed(*data, **kwargs):
+        current = original(*data, **kwargs)
+        prev = _motion_prev[0]
+        if prev is None or len(prev) != len(current):
+            _motion_prev[0] = current
+            return current
+        a = alpha
+        try:
+            blended = tuple(a * c + (1.0 - a) * p for c, p in zip(current, prev, strict=False))
+        except (TypeError, ValueError):
+            # If any element isn't array-like, fall back to the raw output.
+            _motion_prev[0] = current
+            return current
+        _motion_prev[0] = blended
+        return blended
+
+    ex.predict = smoothed
+    ex._smoothed = True
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -128,6 +181,15 @@ class FLPFrontalizer:
         if src_image_path is not None:
             self._load_source(src_image_path)
 
+        # Install motion smoothing AFTER _load_source so the source-image
+        # motion extraction isn't blended with driving-frame extractions.
+        # Reset the EMA state so the first driving frame starts clean.
+        _reset_motion_smoothing()
+        _install_motion_smoothing(
+            self._pipe,
+            alpha=float(os.environ.get("MAXINE_FLP_MOTION_EMA", "0.3")),
+        )
+
     def _load_source(self, src_image_path: str) -> None:
         import cv2
 
@@ -141,6 +203,7 @@ class FLPFrontalizer:
     def set_source(self, src_image_path: str) -> None:
         """Replace the source portrait at runtime (drain pipeline first)."""
         self._load_source(src_image_path)
+        _reset_motion_smoothing()
 
     def frontalize(self, frame_bgr: np.ndarray) -> torch.Tensor | None:
         """Drive FLP with the current webcam frame.
