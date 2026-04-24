@@ -16,6 +16,12 @@ dev = [
     "ruff>=0.6",
     "pre-commit>=3.7",
     "mypy>=1.10",
+    # numpy + torch are needed so the test suite can import the new Python
+    # modules (flp_gpu_adapter, gpu_format_convert, maxine_fused_pipeline)
+    # on CI without the Docker image. CUDA-only tests skip automatically
+    # when cuda isn't available.
+    "numpy>=1.24",
+    "torch>=2.4",
 ]
 
 [tool.ruff]
