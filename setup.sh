@@ -178,14 +178,14 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Python project install (LivePortrait head-pose pipeline)
+# 4. Python project install — host side only gets dev tooling (lint + test
+# parity with CI). All runtime deps (torch, FLP, tensorrt, maxine_ar_ext)
+# live in the Docker image.
 # ---------------------------------------------------------------------------
 info "Installing Python project dependencies..."
 cd "$SCRIPT_DIR"
-uv sync --extra liveportrait
-# mediapipe pins protobuf<5; installed separately per PROJECT_RULES.md
-uv pip install 'mediapipe>=0.10,<0.10.20'
-ok "Python dependencies installed"
+uv sync --all-groups
+ok "Python dev dependencies installed"
 
 # ---------------------------------------------------------------------------
 # FasterLivePortrait ONNX weights — downloaded to /opt/flp-checkpoints on
@@ -228,8 +228,7 @@ sudo rsync -a --delete \
 sudo chown -R "$USER:$USER" /opt/maxine-eye-contact-webcam
 ok "Synced to /opt/maxine-eye-contact-webcam"
 cd /opt/maxine-eye-contact-webcam
-uv sync --extra liveportrait
-uv pip install 'mediapipe>=0.10,<0.10.20'
+uv sync --all-groups
 cd "$SCRIPT_DIR"
 ok "Python environment built in /opt"
 

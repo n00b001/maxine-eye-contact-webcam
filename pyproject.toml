@@ -22,6 +22,9 @@ dev = [
     # when cuda isn't available.
     "numpy>=1.24",
     "torch>=2.4",
+    # huggingface_hub is used by setup.sh to download FLP ONNX weights
+    # into /opt/flp-checkpoints on the host.
+    "huggingface_hub>=0.24",
 ]
 
 [tool.ruff]
