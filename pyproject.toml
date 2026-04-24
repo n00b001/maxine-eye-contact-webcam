@@ -1,61 +1,18 @@
 [project]
 name = "maxine-eye-contact-webcam"
-version = "0.1.0"
-description = "Real-time webcam pipeline for NVIDIA Maxine Eye Contact NIM -> virtual webcam (v4l2loopback)"
+version = "0.2.0"
+description = "Real-time unified head-pose + gaze-redirection webcam (FasterLivePortrait + NVIDIA AR SDK, single Docker container)"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
-dependencies = [
-    "grpcio>=1.62.0",
-    "protobuf>=5.26.0",
-    "numpy>=1.24.0",
-    "opencv-python>=4.9.0",
-]
-
-# NOTE: `mediapipe` is required at runtime to enable the *geometric* head
-# pose engine, but it pins `protobuf<5` which is incompatible with the
-# generated `eyecontact_pb2` stubs (built with `protobuf==6`). We therefore
-# do NOT list it in project dependencies or extras; users install it out of
-# band per the README. The pipeline gracefully disables geometric head
-# pose when mediapipe is not importable.
-
-# The `liveportrait` extra installs the real head-pose correction engine
-# (PyTorch + LivePortrait runtime deps). Enable with:
-#     uv sync --extra liveportrait
-# torch + torchvision come from the PyTorch CUDA 12.1 wheel index configured
-# under [tool.uv.sources] below.
-[project.optional-dependencies]
-liveportrait = [
-    "torch>=2.3,<2.6",
-    "torchvision>=0.18",
-    "huggingface_hub>=0.24",
-    "imageio>=2.34",
-    "imageio-ffmpeg>=0.5",
-    "omegaconf>=2.3",
-    "tyro>=0.8",
-    "rich>=13.0",
-    "scikit-image>=0.24",
-    "albumentations>=1.4",
-    "onnxruntime-gpu>=1.18,<1.20",
-]
-
-[tool.uv.sources]
-torch = [{ index = "pytorch-cu121" }]
-torchvision = [{ index = "pytorch-cu121" }]
-
-[[tool.uv.index]]
-name = "pytorch-cu121"
-url = "https://download.pytorch.org/whl/cu121"
-explicit = true
-
-[project.scripts]
-maxine-webcam = "maxine_webcam_pipeline:main"
+# Runtime deps live in the Docker image (docker/Dockerfile) — FasterLivePortrait,
+# TensorRT, pycuda, the pybind11 shim over NVIDIA AR SDK, etc. The host only
+# needs dev tooling for lint + test parity with CI.
+dependencies = []
 
 [dependency-groups]
 dev = [
-    "grpcio-tools>=1.62.0",
     "pytest>=8.0",
-    "pytest-cov>=5.0",
     "ruff>=0.6",
     "pre-commit>=3.7",
     "mypy>=1.10",
@@ -65,58 +22,16 @@ dev = [
 line-length = 100
 target-version = "py310"
 extend-exclude = [
-    "eyecontact_pb2.py",
-    "eyecontact_pb2_grpc.py",
-    "vendor/**",  # third-party code (LivePortrait) — not our style to enforce
+    "vendor/**",  # cloned third-party (FasterLivePortrait) — upstream style, not ours
+    "docker/**",  # C++ shim sources + build outputs
 ]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "N", "UP", "B", "C4", "SIM"]
 
-[tool.ruff.lint.per-file-ignores]
-# Tests use PascalCase names for patched classes (MockFaceMesh) which is
-# idiomatic when mocking class objects; also allow combined-with refactors
-# to stay readable.
-"tests/**.py" = ["N806", "SIM117"]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
-
-[tool.coverage.run]
-source = ["."]
-omit = [
-    ".venv/*",
-    "__pycache__/*",
-    "tests/*",
-    "eyecontact_pb2.py",
-    "eyecontact_pb2_grpc.py",
-    "vendor/*",
-    "liveportrait_frontalizer.py",
-    "maxine_arsdk_headpose.py",
-]
-
-[tool.coverage.report]
-fail_under = 80
-skip_covered = true
-show_missing = true
-# Threading/subprocess entry points and the main CLI need end-to-end
-# hardware-in-the-loop tests (real v4l2 devices, ffmpeg, gRPC NIM) which are
-# out of scope for unit tests. Exclude their bodies from coverage accounting
-# so the 80% gate reflects coverage of the genuinely testable surface.
-exclude_also = [
-    "def _handle_signal",
-    "def _run_ffmpeg",
-    "def _set_camera_controls",
-    "def encode_gop_to_mp4",
-    "def decode_mp4_to_frames",
-    "def capture_thread",
-    "def nim_pipeline_thread",
-    "def output_thread",
-    "def main",
-    "if __name__ == .__main__.",
-    "raise NotImplementedError",
-]
 
 [tool.uv]
 python-preference = "only-managed"
