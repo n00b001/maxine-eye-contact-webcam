@@ -153,6 +153,13 @@ RUN git clone "$FLP_REPO" /app/vendor/FasterLivePortrait \
     && git -C /app/vendor/FasterLivePortrait checkout "$FLP_COMMIT" \
     && rm -rf /app/vendor/FasterLivePortrait/.git
 
+# Install our TRT 10-compatible ONNX→engine builder next to the FLP one.
+# FLP's scripts/onnx2trt.py targets TRT 8.x (max_workspace_size, max_batch_size,
+# build_engine — all removed in TRT 10) and its shipped grid_sample plugin
+# links against libnvinfer.so.8. Our replacement uses the TRT 10 API and
+# relies on TRT 10's native 3-D grid_sample. See docker/scripts/onnx2trt_v10.py.
+COPY docker/scripts/onnx2trt_v10.py /app/vendor/FasterLivePortrait/scripts/onnx2trt_v10.py
+
 WORKDIR /app
 
 # ---------------------------------------------------------------------------

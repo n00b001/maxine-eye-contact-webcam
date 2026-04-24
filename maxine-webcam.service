@@ -1,0 +1,33 @@
+[Unit]
+Description=Maxine Eye Contact + Head Pose Correction (unified GPU pipeline)
+Documentation=https://github.com/n00b001/maxine-eye-contact-webcam
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=__MAXINE_USER__
+WorkingDirectory=/opt/maxine-eye-contact-webcam
+TimeoutStartSec=900
+Environment="PYTHONUNBUFFERED=1"
+
+# Clean any stale container from a previous run before compose brings it up.
+ExecStartPre=-/usr/bin/docker compose -f /opt/maxine-eye-contact-webcam/docker-compose.yml down --remove-orphans
+
+# Keep logs flowing to journald: --abort-on-container-exit so systemd sees
+# any crash and applies Restart=on-failure.
+ExecStart=/usr/bin/docker compose -f /opt/maxine-eye-contact-webcam/docker-compose.yml up --abort-on-container-exit --no-log-prefix
+
+# Graceful stop: bring the compose stack down with a generous timeout so
+# the Python orchestrator can drain its sink ffmpeg cleanly.
+ExecStop=/usr/bin/docker compose -f /opt/maxine-eye-contact-webcam/docker-compose.yml down --timeout 10
+
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=maxine-webcam
+
+[Install]
+WantedBy=multi-user.target

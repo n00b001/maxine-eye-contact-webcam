@@ -142,6 +142,15 @@ else
             exit 1
         fi
 
+        # FLP's onnx2trt.py loads a custom TRT plugin via the RELATIVE path
+        # ./checkpoints/liveportrait_onnx/libgrid_sample_3d_plugin.so. Our
+        # weights live at /opt/flp-checkpoints/liveportrait_onnx/. Create a
+        # symlink so FLP finds the plugin, then cd into the FLP root before
+        # invoking the build script.
+        mkdir -p /app/vendor/FasterLivePortrait/checkpoints
+        ln -sfn "$ONNX_DIR" /app/vendor/FasterLivePortrait/checkpoints/liveportrait_onnx
+        cd /app/vendor/FasterLivePortrait
+
         # Build engines with per-engine progress counter
         built=0
         idx=0
@@ -158,7 +167,9 @@ else
             fi
 
             echo "[entrypoint] Building $idx/$TOTAL_ENGINES: $onnx_name... (precision=$precision, this can take ~2 min)"
-            python3 "$SCRIPTS_DIR/onnx2trt.py" \
+            # Use our TRT 10-compatible builder; FLP's onnx2trt.py targets
+            # TRT 8.x APIs that were removed in TRT 10 (see onnx2trt_v10.py).
+            python3 "$SCRIPTS_DIR/onnx2trt_v10.py" \
                 -o "$onnx_path" \
                 -e "$trt_path" \
                 -p "$precision"
