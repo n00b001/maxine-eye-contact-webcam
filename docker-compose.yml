@@ -12,6 +12,10 @@ services:
     devices:
       - /dev/video0:/dev/video0
       - /dev/video10:/dev/video10
-    command: ["/usr/local/bin/maxine_ar_webcam", "--mjpeg", "/dev/video10", "1920", "1080"]
-    # Override for lower resolutions / no MJPEG:
+    volumes:
+      # FLP ONNX models + TRT engines (downloaded once on host, built on first run)
+      - /opt/flp-checkpoints:/opt/flp-checkpoints
+      # User-supplied neutral frontal portrait (see setup.sh for instructions)
+      - /opt/maxine-portrait.jpg:/app/src-portrait.jpg:ro
+    # Default CMD is set in Dockerfile (Python orchestrator). Override example:
     # command: ["/usr/local/bin/maxine_ar_webcam", "/dev/video10", "640", "480"]
