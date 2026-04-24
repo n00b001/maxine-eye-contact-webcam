@@ -22,6 +22,7 @@ needed for the warping-spade engine.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import logging
 import os
 import sys
@@ -31,10 +32,31 @@ import tensorrt as trt
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 log = logging.getLogger("onnx2trt_v10")
 
+# Load the grid_sample_3d TRT 10 plugin (SeanWangJS/grid-sample3d-trt-plugin
+# built in the Dockerfile → /usr/local/lib/libgrid_sample_3d_plugin.so). FLP's
+# warping_spade-fix.onnx uses a custom "GridSample3D" op; TRT 10's native
+# GridSample is 4-D only, so the plugin is required for 5-D (3-D) sampling.
+_GRID_SAMPLE_3D_PLUGIN = os.environ.get(
+    "GRID_SAMPLE_3D_PLUGIN",
+    "/usr/local/lib/libgrid_sample_3d_plugin.so",
+)
+
 
 def build_engine(onnx_path: str, engine_path: str, precision: str, verbose: bool = False) -> None:
     """Parse ONNX and serialize a TensorRT engine to disk."""
     trt_logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.INFO)
+
+    # Load the 3-D grid sample plugin BEFORE init_libnvinfer_plugins so its
+    # creator is registered in the plugin registry. RTLD_GLOBAL is required
+    # so TRT's static initialisers see the plugin's creator symbols.
+    if os.path.isfile(_GRID_SAMPLE_3D_PLUGIN):
+        ctypes.CDLL(_GRID_SAMPLE_3D_PLUGIN, mode=ctypes.RTLD_GLOBAL)
+        log.info("Loaded grid_sample_3d plugin: %s", _GRID_SAMPLE_3D_PLUGIN)
+    else:
+        log.warning(
+            "grid_sample_3d plugin not found at %s — warping_spade build will fail",
+            _GRID_SAMPLE_3D_PLUGIN,
+        )
     trt.init_libnvinfer_plugins(trt_logger, namespace="")
 
     builder = trt.Builder(trt_logger)

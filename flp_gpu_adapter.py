@@ -24,7 +24,9 @@ until the next frontalize() call; clone it if you need to keep it.
 
 from __future__ import annotations
 
+import ctypes
 import logging
+import os
 import pathlib
 import sys
 
@@ -37,6 +39,22 @@ import torch
 _VENDOR_ROOT = pathlib.Path(__file__).parent / "vendor" / "FasterLivePortrait"
 if str(_VENDOR_ROOT) not in sys.path:
     sys.path.insert(0, str(_VENDOR_ROOT))
+
+# Pre-load the grid_sample_3d TRT 10 plugin with RTLD_GLOBAL so FLP's
+# later relative-path ctypes.CDLL call (in src/models/predictor.py) is a
+# no-op — it can silently fail (the symbols are already in the process
+# namespace). The Dockerfile installs the plugin at /usr/local/lib.
+_PLUGIN_PATH = os.environ.get(
+    "GRID_SAMPLE_3D_PLUGIN",
+    "/usr/local/lib/libgrid_sample_3d_plugin.so",
+)
+if os.path.isfile(_PLUGIN_PATH):
+    try:
+        ctypes.CDLL(_PLUGIN_PATH, mode=ctypes.RTLD_GLOBAL)
+    except OSError as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to pre-load grid_sample_3d plugin (%s): %s", _PLUGIN_PATH, exc
+        )
 
 from omegaconf import OmegaConf  # noqa: E402
 from src.pipelines import faster_live_portrait_pipeline as _flp_pipe_mod  # noqa: E402
@@ -153,11 +171,13 @@ class FLPFrontalizer:
         # can't leak through on a no-face frame.
         _last_paste_back[0] = None
 
+        # Don't pass realtime= as kwarg — FLP's run() threads it positionally
+        # into _run() internally, so a kwarg here causes a duplicate-argument
+        # TypeError. FLP defaults work correctly for our continuous capture.
         result = self._pipe.run(
             frame_bgr,
             self._img_src,
             self._src_info,
-            realtime=True,
         )
         _img_crop, _out_crop, i_p_pstbk_numpy, _motion = result
 

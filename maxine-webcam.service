@@ -14,6 +14,12 @@ Environment="PYTHONUNBUFFERED=1"
 
 # Clean any stale container from a previous run before compose brings it up.
 ExecStartPre=-/usr/bin/docker compose -f /opt/maxine-eye-contact-webcam/docker-compose.yml down --remove-orphans
+# Disable the UVC "low-light framerate drop" feature. Logitech and similar
+# webcams will happily drop from 30 fps to 2 fps in dim rooms, which kills
+# real-time pipeline performance. The container holds /dev/video0 during
+# operation, so this must run BEFORE compose up.
+ExecStartPre=-/usr/bin/v4l2-ctl -d /dev/video0 --set-ctrl=exposure_dynamic_framerate=0
+ExecStartPre=-/usr/bin/v4l2-ctl -d /dev/video0 --set-parm=30
 
 # Keep logs flowing to journald: --abort-on-container-exit so systemd sees
 # any crash and applies Restart=on-failure.

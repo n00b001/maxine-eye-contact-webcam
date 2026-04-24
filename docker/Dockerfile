@@ -25,6 +25,38 @@ ARG ARSDK_BASE=ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-base:latest
 FROM ${ARSDK_BASE} AS arsdk
 
 # ---------------------------------------------------------------------------
+# Stage 1b: Build the grid_sample_3d TRT 10 plugin in a -devel image that
+# actually has nvcc + CUDA headers. We copy just the resulting .so into the
+# runtime stage so the final image stays slim.
+# ---------------------------------------------------------------------------
+FROM nvidia/cuda:12.8.1-devel-ubuntu24.04 AS plugin-builder
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git cmake build-essential ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+# Pull TRT 10 headers + runtime libs from the ARSDK base image so the plugin
+# links against the same ABI FLP's ONNX parser uses at runtime.
+COPY --from=arsdk /usr/local/ARSDK/external/tensorrt/include /opt/trt/include
+COPY --from=arsdk /usr/local/ARSDK/external/tensorrt/lib /opt/trt/lib
+ARG GRID_SAMPLE_3D_REPO=https://github.com/SeanWangJS/grid-sample3d-trt-plugin.git
+ARG GRID_SAMPLE_3D_COMMIT=main
+RUN git clone "$GRID_SAMPLE_3D_REPO" /tmp/grid-sample3d \
+    && cd /tmp/grid-sample3d \
+    && git checkout "$GRID_SAMPLE_3D_COMMIT" \
+    && mkdir build && cd build \
+    && cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CUDA_ARCHITECTURES="70;80;86;89;90" \
+        -DTensorRT_INCLUDE_DIR=/opt/trt/include \
+        -DTensorRT_LIB_DIR=/opt/trt/lib \
+        -DCMAKE_CXX_FLAGS="-I/opt/trt/include" \
+        -DCMAKE_CUDA_FLAGS="-I/opt/trt/include" \
+        -DCMAKE_EXE_LINKER_FLAGS="-L/opt/trt/lib -lnvinfer" \
+        -DCMAKE_SHARED_LINKER_FLAGS="-L/opt/trt/lib -lnvinfer" \
+    && cmake --build . --target grid_sample_3d_plugin -- -j$(nproc) \
+    && cp libgrid_sample_3d_plugin.so /tmp/grid-sample3d/libgrid_sample_3d_plugin.so
+
+# ---------------------------------------------------------------------------
 # Stage 2: Application build (GitHub-hosted runners can do this)
 # ---------------------------------------------------------------------------
 # Base image: nvidia/cuda:12.8.1-runtime-ubuntu24.04 ships CUDA 12.8.
@@ -87,7 +119,11 @@ RUN pip3 install --no-cache-dir --break-system-packages \
     pillow \
     tqdm \
     transformers \
-    tensorrt
+    # Pin tensorrt to 10.9.x so the engines we serialize match the ABI of
+    # the ARSDK-bundled libnvinfer.so.10.9.0 that the running process loads
+    # (via LD_LIBRARY_PATH). Mismatched versions → Serialization assertion
+    # "stdVersionRead == kSERIALIZATION_VERSION failed" on engine load.
+    "tensorrt==10.9.*"
 
 # ---------------------------------------------------------------------------
 # Copy ARSDK from the base image (proprietary layer)
@@ -153,12 +189,23 @@ RUN git clone "$FLP_REPO" /app/vendor/FasterLivePortrait \
     && git -C /app/vendor/FasterLivePortrait checkout "$FLP_COMMIT" \
     && rm -rf /app/vendor/FasterLivePortrait/.git
 
-# Install our TRT 10-compatible ONNX→engine builder next to the FLP one.
+# Copy in the grid_sample_3d TRT 10 plugin built in stage 1b.
+COPY --from=plugin-builder /tmp/grid-sample3d/libgrid_sample_3d_plugin.so /usr/local/lib/libgrid_sample_3d_plugin.so
+RUN ldconfig
+
+# Install our TRT 10-compatible ONNX→engine builder alongside FLP's.
 # FLP's scripts/onnx2trt.py targets TRT 8.x (max_workspace_size, max_batch_size,
-# build_engine — all removed in TRT 10) and its shipped grid_sample plugin
-# links against libnvinfer.so.8. Our replacement uses the TRT 10 API and
-# relies on TRT 10's native 3-D grid_sample. See docker/scripts/onnx2trt_v10.py.
+# build_engine — all removed in TRT 10). Our replacement uses the TRT 10 API
+# and loads the freshly-built grid_sample_3d plugin before parsing the ONNX.
 COPY docker/scripts/onnx2trt_v10.py /app/vendor/FasterLivePortrait/scripts/onnx2trt_v10.py
+
+# Patch FLP's motion_extractor_model.py: the TRT branch hard-codes an output
+# ordering (kp first) that our TRT 10 engine doesn't use — our engines
+# preserve the ONNX graph order (pitch, yaw, roll, t, exp, scale, kp).
+# Replace the TRT-specific unpacking with the same order as the PyTorch
+# branch so it works with both back-ends.
+RUN sed -i 's|kp, pitch, yaw, roll, t, exp, scale = data|pitch, yaw, roll, t, exp, scale, kp = data  # TRT 10: same order as ONNX / PyTorch|' \
+    /app/vendor/FasterLivePortrait/src/models/motion_extractor_model.py
 
 WORKDIR /app
 

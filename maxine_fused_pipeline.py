@@ -114,6 +114,12 @@ def _open_capture(
         "error",
         "-f",
         "v4l2",
+        # Request MJPEG input: most UVC webcams only expose 1080p30 via
+        # MJPG — YUYV at 1080p is typically capped at 7.5 fps. Without an
+        # explicit input_format v4l2 will pick YUYV and the pipeline runs
+        # at the uncompressed cap.
+        "-input_format",
+        "mjpeg",
         "-framerate",
         str(fps),
         "-video_size",

@@ -20,6 +20,25 @@ ONNX_DIR="$CHECKPOINTS_DIR/liveportrait_onnx"
 SCRIPTS_DIR="/app/vendor/FasterLivePortrait/scripts"
 SENTINEL="$CHECKPOINTS_DIR/.engines-built"
 
+# Always overwrite the HuggingFace-shipped libgrid_sample_3d_plugin.so with
+# our TRT 10 build (the HF copy links against libnvinfer.so.8 — TRT 8 —
+# which we don't ship). Predictors at runtime and onnx2trt_v10.py at build
+# time both load this path, so we need the TRT 10 binary here. /opt/…/ is a
+# bind mount so this persists on the host.
+if [ -f /usr/local/lib/libgrid_sample_3d_plugin.so ] && [ -d "$ONNX_DIR" ]; then
+    cp -f /usr/local/lib/libgrid_sample_3d_plugin.so "$ONNX_DIR/libgrid_sample_3d_plugin.so"
+fi
+
+# Ensure the FLP-expected relative paths resolve from any CWD. The
+# orchestrator's CWD is /app, but FLP uses `./checkpoints/...` (TRT
+# plugin + engines) and `./assets/...` (mask_template.png for paste-back)
+# as relative paths from the FLP root. Create symlinks in BOTH /app and
+# /app/vendor/FasterLivePortrait so either CWD works.
+mkdir -p /app/vendor/FasterLivePortrait/checkpoints /app/checkpoints
+ln -sfn "$ONNX_DIR" /app/vendor/FasterLivePortrait/checkpoints/liveportrait_onnx
+ln -sfn "$ONNX_DIR" /app/checkpoints/liveportrait_onnx
+ln -sfn /app/vendor/FasterLivePortrait/assets /app/assets 2>/dev/null || true
+
 # ---------------------------------------------------------------------------
 # TRT engine list — must match scripts/all_onnx2trt.sh
 # ---------------------------------------------------------------------------
@@ -180,7 +199,8 @@ else
         echo "[entrypoint] All TRT engines built ($built new)."
     fi
 
-    # Verify all engines are non-empty (> 1 MB = 1048576 bytes)
+    # Verify all engines are non-empty (> 10 KB). Some stitching engines
+    # are legitimately tiny (~40 KB) — a 1 MB threshold would reject them.
     echo "[entrypoint] Verifying TRT engine sizes..."
     for onnx_name in "${!ONNX_TO_PRECISION[@]}"; do
         trt_name="${onnx_name%.onnx}.trt"
@@ -190,7 +210,7 @@ else
             exit 1
         fi
         size_bytes="$(wc -c < "$trt_path")"
-        if [ "$size_bytes" -lt 1048576 ]; then
+        if [ "$size_bytes" -lt 10240 ]; then
             echo "[entrypoint] ERROR: Engine suspiciously small (${size_bytes} bytes): $trt_path" >&2
             echo "[entrypoint] The build may have failed silently. Delete the file and restart." >&2
             exit 1
