@@ -10,23 +10,105 @@ Type=simple
 User=__MAXINE_USER__
 WorkingDirectory=/opt/maxine-eye-contact-webcam
 TimeoutStartSec=900
+
+# ============================================================================
+# User-tunable configuration. Every option below is forwarded to the
+# container's environment and read by maxine_fused_pipeline.py (argparse
+# reads each env var as its default). Override any of them by editing this
+# file and `sudo systemctl daemon-reload && sudo systemctl restart
+# maxine-webcam.service`.
+# ============================================================================
+
+# ---------------- Pipeline stage toggles ----------------
+# Set to 0 to disable. Both on by default.
+Environment="FLP_ENABLED=1"
+Environment="GAZE_ENABLED=1"
+
+# ---------------- Video orientation ----------------
+# 1 = horizontally flip the output (selfie orientation). 0 = webcam-native LR.
+Environment="MIRROR=1"
+
+# ---------------- Devices ----------------
+Environment="INPUT_DEVICE=/dev/video0"
+Environment="OUTPUT_DEVICE=/dev/video10"
+
+# ---------------- Resolution + framerate ----------------
+# OUTPUT_WIDTH/HEIGHT = size of frames written to /dev/video10 (what
+# consumer apps like Zoom see).
+Environment="OUTPUT_WIDTH=1920"
+Environment="OUTPUT_HEIGHT=1080"
+# CAPTURE_WIDTH/HEIGHT = size requested from the webcam. FLP downscales
+# internally so higher capture res is wasted bandwidth + latency.
+Environment="CAPTURE_WIDTH=640"
+Environment="CAPTURE_HEIGHT=480"
+Environment="FPS=30"
+
+# ---------------- Source portrait ----------------
+# Neutral frontal portrait of the user. MUST exist at this path (mounted
+# read-only into the container by docker-compose.yml).
+Environment="SRC_IMAGE=/app/src-portrait.jpg"
+
+# ---------------- FLP stability + per-axis strength ----------------
+# EMA smoothing alpha for FLP's motion_extractor output.
+#   1.0  = off (raw FLP, maximum responsiveness, most shimmer)
+#   0.5  = balanced
+#   0.3  = default; ~65 ms half-response at 30 fps
+#   0.1  = very smooth but noticeably laggy
+Environment="FLP_MOTION_EMA=0.3"
+# Per-axis frontalization strength. For each axis:
+#   0.0 = no correction on that axis (let driving pose pass through)
+#   1.0 = full frontalize (lock that axis to the source portrait's pose)
+# 0.5 means "halfway between your real pose and the frontal pose".
+Environment="FLP_PITCH_STRENGTH=1.0"
+Environment="FLP_YAW_STRENGTH=1.0"
+Environment="FLP_ROLL_STRENGTH=1.0"
+
+# ---------------- AR SDK gaze thresholds (degrees) ----------------
+# The AR SDK softly starts redirecting gaze at the LOW threshold and
+# reaches full strength at the HIGH threshold. Outside HIGH the SDK
+# stops redirecting (the look is considered "intentional").
+Environment="GAZE_PITCH_LOW=20.0"
+Environment="GAZE_PITCH_HIGH=30.0"
+Environment="GAZE_YAW_LOW=20.0"
+Environment="GAZE_YAW_HIGH=30.0"
+Environment="GAZE_HEAD_PITCH_LOW=15.0"
+Environment="GAZE_HEAD_PITCH_HIGH=25.0"
+Environment="GAZE_HEAD_YAW_LOW=25.0"
+Environment="GAZE_HEAD_YAW_HIGH=35.0"
+
+# ---------------- AR SDK other knobs ----------------
+# Landmark model size: 68 (faster, less precise) or 126 (default).
+Environment="GAZE_LANDMARKS=126"
+# 0..7 — higher smooths eye-size changes more aggressively.
+Environment="GAZE_EYE_SIZE=3"
+# CUDA graph capture: 1 = on (lower latency), 0 = off.
+Environment="GAZE_CUDA_GRAPH=1"
+# Temporal filtering: 1 = on (smoother gaze vector), 0 = off.
+Environment="GAZE_STABILIZE=1"
+
+# ---------------- Paths (rarely changed) ----------------
+Environment="MODEL_DIR=/usr/local/ARSDK/lib/models"
+Environment="FLP_CFG=/app/vendor/FasterLivePortrait/configs/trt_infer.yaml"
+
+# ---------------- Logging ----------------
+Environment="LOG_LEVEL=INFO"
 Environment="PYTHONUNBUFFERED=1"
 
-# Clean any stale container from a previous run before compose brings it up.
+# ============================================================================
+# Lifecycle hooks (internal — don't change unless you know what you're doing).
+# ============================================================================
+
+# Clean any stale container + disable the UVC low-light framerate drop on
+# /dev/video0 (without this many webcams silently drop to 2 fps in dim rooms).
 ExecStartPre=-/usr/bin/docker compose -f /opt/maxine-eye-contact-webcam/docker-compose.yml down --remove-orphans
-# Disable the UVC "low-light framerate drop" feature. Logitech and similar
-# webcams will happily drop from 30 fps to 2 fps in dim rooms, which kills
-# real-time pipeline performance. The container holds /dev/video0 during
-# operation, so this must run BEFORE compose up.
 ExecStartPre=-/usr/bin/v4l2-ctl -d /dev/video0 --set-ctrl=exposure_dynamic_framerate=0
 ExecStartPre=-/usr/bin/v4l2-ctl -d /dev/video0 --set-parm=30
 
-# Keep logs flowing to journald: --abort-on-container-exit so systemd sees
-# any crash and applies Restart=on-failure.
+# Start the container. --abort-on-container-exit makes Restart=on-failure work.
+# --no-log-prefix keeps the journal output clean (one line per Python log line).
 ExecStart=/usr/bin/docker compose -f /opt/maxine-eye-contact-webcam/docker-compose.yml up --abort-on-container-exit --no-log-prefix
 
-# Graceful stop: bring the compose stack down with a generous timeout so
-# the Python orchestrator can drain its sink ffmpeg cleanly.
+# Graceful stop — give the orchestrator 10 s to drain its sink ffmpeg.
 ExecStop=/usr/bin/docker compose -f /opt/maxine-eye-contact-webcam/docker-compose.yml down --timeout 10
 
 Restart=on-failure

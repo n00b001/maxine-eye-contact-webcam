@@ -144,6 +144,61 @@ def _install_motion_smoothing(pipe, alpha: float) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Per-axis frontalization strength.
+#
+# After smoothing, each axis of the driving motion (pitch/yaw/roll) can be
+# independently blended toward the source portrait's pose:
+#
+#     out = (1 - strength) * driving + strength * source_pose
+#
+# strength=1.0 → axis fully frontalizes (output == source pose for that axis)
+# strength=0.0 → axis passes through unchanged (no correction for that axis)
+# strength=0.5 → half-way between driving and source
+# ---------------------------------------------------------------------------
+
+_source_pose: list = [None]  # tuple(source_pitch, source_yaw, source_roll)
+
+
+def _capture_source_pose(pipe) -> None:
+    """Read the source-image pose out of FLP's src_infos cache."""
+    try:
+        info = pipe.src_infos[0][0]  # first face of the single source frame
+        _source_pose[0] = (info["pitch"].copy(), info["yaw"].copy(), info["roll"].copy())
+    except (AttributeError, IndexError, KeyError, TypeError) as exc:
+        logger.warning("Could not capture source pose for axis-strength blend: %s", exc)
+
+
+def _install_axis_strength(pipe, strengths: tuple) -> None:
+    """Blend each axis of motion_extractor output toward the source pose."""
+    sp, sy, sr = strengths
+    if sp == 0.0 and sy == 0.0 and sr == 0.0:
+        return  # all three zero = pass driving motion through unchanged
+    ex = pipe.model_dict.get("motion_extractor") if hasattr(pipe, "model_dict") else None
+    if ex is None or getattr(ex, "_axis_blended", False):
+        return
+    inner = ex.predict  # already wrapped by smoothing if that was installed
+
+    def blend(*data, **kwargs):
+        result = inner(*data, **kwargs)
+        src = _source_pose[0]
+        if src is None or len(result) < 7:
+            return result
+        src_p, src_y, src_r = src
+        p, y, r = result[0], result[1], result[2]
+        t, exp_, scale, kp = result[3], result[4], result[5], result[6]
+        try:
+            p_out = (1.0 - sp) * p + sp * src_p
+            y_out = (1.0 - sy) * y + sy * src_y
+            r_out = (1.0 - sr) * r + sr * src_r
+        except (TypeError, ValueError):
+            return result
+        return (p_out, y_out, r_out, t, exp_, scale, kp)
+
+    ex.predict = blend
+    ex._axis_blended = True
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -166,6 +221,8 @@ class FLPFrontalizer:
         cfg_path: str = "vendor/FasterLivePortrait/configs/trt_infer.yaml",
         src_image_path: str | None = None,
         device: str = "cuda:0",
+        motion_ema_alpha: float | None = None,
+        axis_strength: tuple[float, float, float] | None = None,
     ):
         self._device = torch.device(device)
         torch.cuda.set_device(self._device)
@@ -185,10 +242,18 @@ class FLPFrontalizer:
         # motion extraction isn't blended with driving-frame extractions.
         # Reset the EMA state so the first driving frame starts clean.
         _reset_motion_smoothing()
-        _install_motion_smoothing(
-            self._pipe,
-            alpha=float(os.environ.get("MAXINE_FLP_MOTION_EMA", "0.3")),
+        alpha = (
+            motion_ema_alpha
+            if motion_ema_alpha is not None
+            else float(os.environ.get("MAXINE_FLP_MOTION_EMA", "0.3"))
         )
+        _install_motion_smoothing(self._pipe, alpha=alpha)
+
+        # Capture source pose + install per-axis strength blend. Order
+        # matters: smoothing first (inner), axis-strength on top (outer).
+        _capture_source_pose(self._pipe)
+        strengths = axis_strength if axis_strength is not None else (1.0, 1.0, 1.0)
+        _install_axis_strength(self._pipe, strengths)
 
     def _load_source(self, src_image_path: str) -> None:
         import cv2

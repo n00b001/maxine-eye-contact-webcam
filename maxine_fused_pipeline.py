@@ -43,85 +43,245 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _env(name: str, default: str) -> str:
+    """Return an environment variable or default. Wrapped so defaults are
+    easy to audit in one place (`grep _env` shows every knob)."""
+    return os.environ.get(name, default)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "on", "y")
+
+
 def _build_parser() -> argparse.ArgumentParser:
+    """
+    Every knob reads from an environment variable first, then the CLI.
+    This lets the systemd service file expose every tunable as a single
+    `Environment=` line without needing to weave custom argv logic.
+    """
     p = argparse.ArgumentParser(
         description=(
             "Maxine fused pipeline: webcam -> FLP frontalization -> AR gaze redirect -> v4l2 sink"
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--input-device", default="/dev/video0", help="V4L2 capture device")
-    p.add_argument("--output-device", default="/dev/video10", help="V4L2 sink device")
-    p.add_argument("--width", type=int, default=1920, help="Output frame width in pixels")
-    p.add_argument("--height", type=int, default=1080, help="Output frame height in pixels")
+
+    # ---------------- Devices + resolution + framerate ----------------
+    p.add_argument(
+        "--input-device",
+        default=_env("INPUT_DEVICE", "/dev/video0"),
+        help="V4L2 capture device (env: INPUT_DEVICE)",
+    )
+    p.add_argument(
+        "--output-device",
+        default=_env("OUTPUT_DEVICE", "/dev/video10"),
+        help="V4L2 sink device (env: OUTPUT_DEVICE)",
+    )
+    p.add_argument(
+        "--width",
+        type=int,
+        default=_env_int("OUTPUT_WIDTH", 1920),
+        help="Output frame width in pixels (env: OUTPUT_WIDTH)",
+    )
+    p.add_argument(
+        "--height",
+        type=int,
+        default=_env_int("OUTPUT_HEIGHT", 1080),
+        help="Output frame height in pixels (env: OUTPUT_HEIGHT)",
+    )
     # FLP internally resizes the driving frame to ~192x192 for motion
-    # extraction and does face detection on a small image; there is no
-    # benefit to capturing at 1080p. Defaulting capture to 640x480 MJPEG
-    # saves ffmpeg decode time and the H2D transfer, cutting end-to-end
-    # latency significantly. The output side still runs at --width x --height.
+    # extraction. Capturing at 640x480 saves ffmpeg decode + H2D bandwidth.
     p.add_argument(
         "--capture-width",
         type=int,
-        default=640,
-        help="Webcam capture width (smaller = lower latency; default 640)",
+        default=_env_int("CAPTURE_WIDTH", 640),
+        help="Webcam capture width, smaller = lower latency (env: CAPTURE_WIDTH)",
     )
     p.add_argument(
         "--capture-height",
         type=int,
-        default=480,
-        help="Webcam capture height (smaller = lower latency; default 480)",
+        default=_env_int("CAPTURE_HEIGHT", 480),
+        help="Webcam capture height, smaller = lower latency (env: CAPTURE_HEIGHT)",
     )
-    p.add_argument("--fps", type=int, default=30, help="Capture and output frame rate")
+    p.add_argument(
+        "--fps",
+        type=int,
+        default=_env_int("FPS", 30),
+        help="Capture and output frame rate (env: FPS)",
+    )
     p.add_argument(
         "--mirror",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Horizontally flip output for selfie orientation (matches what most "
-        "webcam consumers expect). Use --no-mirror to keep webcam-native LR.",
+        default=_env_bool("MIRROR", True),
+        help="Horizontally flip output for selfie orientation (env: MIRROR=0|1)",
     )
-    p.add_argument("--src-image", required=True, help="Path to neutral source portrait image")
+    p.add_argument(
+        "--src-image",
+        default=_env("SRC_IMAGE", None),
+        required=_env("SRC_IMAGE", None) is None,
+        help="Path to neutral source portrait image (env: SRC_IMAGE)",
+    )
     p.add_argument(
         "--model-dir",
-        default="/usr/local/ARSDK/lib/models",
-        help="NVIDIA Maxine AR SDK model directory",
+        default=_env("MODEL_DIR", "/usr/local/ARSDK/lib/models"),
+        help="NVIDIA Maxine AR SDK model directory (env: MODEL_DIR)",
     )
     p.add_argument(
         "--cfg",
-        default="vendor/FasterLivePortrait/configs/trt_infer.yaml",
-        help="FasterLivePortrait TRT inference config YAML",
+        default=_env("FLP_CFG", "vendor/FasterLivePortrait/configs/trt_infer.yaml"),
+        help="FasterLivePortrait TRT inference config YAML (env: FLP_CFG)",
     )
     p.add_argument(
         "--log-level",
-        default="INFO",
+        default=_env("LOG_LEVEL", "INFO"),
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Logging verbosity",
+        help="Logging verbosity (env: LOG_LEVEL)",
     )
 
-    # AR SDK optional knobs — defaults mirror gazeEngine.cpp constants.
+    # ---------------- Pipeline-stage toggles ----------------
+    p.add_argument(
+        "--flp",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("FLP_ENABLED", True),
+        help="Enable FasterLivePortrait head-pose correction (env: FLP_ENABLED=0|1)",
+    )
+    p.add_argument(
+        "--gaze",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("GAZE_ENABLED", True),
+        help="Enable NVIDIA AR SDK gaze redirection (env: GAZE_ENABLED=0|1)",
+    )
+
+    # ---------------- FLP stability + per-axis strength ----------------
+    p.add_argument(
+        "--flp-motion-ema",
+        type=float,
+        default=_env_float("FLP_MOTION_EMA", 0.3),
+        metavar="ALPHA",
+        help="EMA alpha for motion smoothing; 1.0 disables (env: FLP_MOTION_EMA)",
+    )
+    p.add_argument(
+        "--flp-pitch-strength",
+        type=float,
+        default=_env_float("FLP_PITCH_STRENGTH", 1.0),
+        metavar="S",
+        help="0.0 = no pitch correction, 1.0 = full frontalize (env: FLP_PITCH_STRENGTH)",
+    )
+    p.add_argument(
+        "--flp-yaw-strength",
+        type=float,
+        default=_env_float("FLP_YAW_STRENGTH", 1.0),
+        metavar="S",
+        help="0.0 = no yaw correction, 1.0 = full frontalize (env: FLP_YAW_STRENGTH)",
+    )
+    p.add_argument(
+        "--flp-roll-strength",
+        type=float,
+        default=_env_float("FLP_ROLL_STRENGTH", 1.0),
+        metavar="S",
+        help="0.0 = no roll correction, 1.0 = full frontalize (env: FLP_ROLL_STRENGTH)",
+    )
+
+    # ---------------- AR SDK knobs ----------------
     p.add_argument(
         "--num-landmarks",
         type=int,
-        default=126,
+        default=_env_int("GAZE_LANDMARKS", 126),
         choices=[68, 126],
-        help="Landmark model size (68 or 126)",
+        help="Landmark model size (env: GAZE_LANDMARKS)",
     )
-    p.add_argument("--no-cuda-graph", action="store_true", help="Disable CUDA graph optimisation")
-    p.add_argument("--no-stabilize", action="store_true", help="Disable temporal stabilisation")
+    p.add_argument(
+        "--no-cuda-graph",
+        action="store_true",
+        default=not _env_bool("GAZE_CUDA_GRAPH", True),
+        help="Disable AR SDK CUDA graph optimisation (env: GAZE_CUDA_GRAPH=0 disables)",
+    )
+    p.add_argument(
+        "--no-stabilize",
+        action="store_true",
+        default=not _env_bool("GAZE_STABILIZE", True),
+        help="Disable AR SDK temporal stabilisation (env: GAZE_STABILIZE=0 disables)",
+    )
     p.add_argument(
         "--eye-size-sensitivity",
         type=int,
-        default=3,
+        default=_env_int("GAZE_EYE_SIZE", 3),
         metavar="N",
-        help="Eye-size sensitivity (0-7)",
+        help="Eye-size sensitivity, 0-7 (env: GAZE_EYE_SIZE)",
     )
-    p.add_argument("--gaze-pitch-low", type=float, default=20.0, metavar="DEG")
-    p.add_argument("--gaze-yaw-low", type=float, default=20.0, metavar="DEG")
-    p.add_argument("--head-pitch-low", type=float, default=15.0, metavar="DEG")
-    p.add_argument("--head-yaw-low", type=float, default=25.0, metavar="DEG")
-    p.add_argument("--gaze-pitch-high", type=float, default=30.0, metavar="DEG")
-    p.add_argument("--gaze-yaw-high", type=float, default=30.0, metavar="DEG")
-    p.add_argument("--head-pitch-high", type=float, default=25.0, metavar="DEG")
-    p.add_argument("--head-yaw-high", type=float, default=35.0, metavar="DEG")
+    p.add_argument(
+        "--gaze-pitch-low",
+        type=float,
+        default=_env_float("GAZE_PITCH_LOW", 20.0),
+        metavar="DEG",
+        help="Gaze pitch deadzone (env: GAZE_PITCH_LOW)",
+    )
+    p.add_argument(
+        "--gaze-yaw-low",
+        type=float,
+        default=_env_float("GAZE_YAW_LOW", 20.0),
+        metavar="DEG",
+        help="Gaze yaw deadzone (env: GAZE_YAW_LOW)",
+    )
+    p.add_argument(
+        "--head-pitch-low",
+        type=float,
+        default=_env_float("GAZE_HEAD_PITCH_LOW", 15.0),
+        metavar="DEG",
+        help="Head pitch deadzone (env: GAZE_HEAD_PITCH_LOW)",
+    )
+    p.add_argument(
+        "--head-yaw-low",
+        type=float,
+        default=_env_float("GAZE_HEAD_YAW_LOW", 25.0),
+        metavar="DEG",
+        help="Head yaw deadzone (env: GAZE_HEAD_YAW_LOW)",
+    )
+    p.add_argument(
+        "--gaze-pitch-high",
+        type=float,
+        default=_env_float("GAZE_PITCH_HIGH", 30.0),
+        metavar="DEG",
+        help="Gaze pitch saturation (env: GAZE_PITCH_HIGH)",
+    )
+    p.add_argument(
+        "--gaze-yaw-high",
+        type=float,
+        default=_env_float("GAZE_YAW_HIGH", 30.0),
+        metavar="DEG",
+        help="Gaze yaw saturation (env: GAZE_YAW_HIGH)",
+    )
+    p.add_argument(
+        "--head-pitch-high",
+        type=float,
+        default=_env_float("GAZE_HEAD_PITCH_HIGH", 25.0),
+        metavar="DEG",
+        help="Head pitch saturation (env: GAZE_HEAD_PITCH_HIGH)",
+    )
+    p.add_argument(
+        "--head-yaw-high",
+        type=float,
+        default=_env_float("GAZE_HEAD_YAW_HIGH", 35.0),
+        metavar="DEG",
+        help="Head yaw saturation (env: GAZE_HEAD_YAW_HIGH)",
+    )
 
     return p
 
@@ -311,49 +471,63 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
         # FasterLivePortrait's internal CUDA kernels are captured on the
         # same stream from the very first call.
         # ------------------------------------------------------------------
-        logger.info("Initialising FLPFrontalizer …")
-        try:
-            from flp_gpu_adapter import FLPFrontalizer
+        frontalizer = None
+        if args.flp:
+            logger.info("Initialising FLPFrontalizer …")
+            try:
+                from flp_gpu_adapter import FLPFrontalizer
 
-            frontalizer = FLPFrontalizer(
-                cfg_path=args.cfg,
-                src_image_path=args.src_image,
-                device="cuda:0",
-            )
-        except Exception as exc:
-            logger.error("FLPFrontalizer init failed: %s", exc)
-            sys.exit(1)
+                frontalizer = FLPFrontalizer(
+                    cfg_path=args.cfg,
+                    src_image_path=args.src_image,
+                    device="cuda:0",
+                    motion_ema_alpha=args.flp_motion_ema,
+                    axis_strength=(
+                        args.flp_pitch_strength,
+                        args.flp_yaw_strength,
+                        args.flp_roll_strength,
+                    ),
+                )
+            except Exception as exc:
+                logger.error("FLPFrontalizer init failed: %s", exc)
+                sys.exit(1)
+        else:
+            logger.info("FLP disabled (--no-flp / FLP_ENABLED=0) — head-pose correction off")
 
         # ------------------------------------------------------------------
         # Init GazeRedirect inside the same stream context. The SDK receives
         # stream.cuda_stream so its internal CUDA ops are on the same stream.
         # ------------------------------------------------------------------
-        logger.info("Initialising GazeRedirect …")
-        try:
-            import maxine_ar_ext
+        gaze = None
+        if args.gaze:
+            logger.info("Initialising GazeRedirect …")
+            try:
+                import maxine_ar_ext
 
-            gaze = maxine_ar_ext.GazeRedirect(
-                width=width,
-                height=height,
-                model_dir=args.model_dir,
-                cuda_stream_ptr=stream.cuda_stream,
-                num_landmarks=args.num_landmarks,
-                use_cuda_graph=not args.no_cuda_graph,
-                stabilize=not args.no_stabilize,
-                gaze_redirect=True,
-                eye_size_sensitivity=args.eye_size_sensitivity,
-                gaze_pitch_threshold_low=args.gaze_pitch_low,
-                gaze_yaw_threshold_low=args.gaze_yaw_low,
-                head_pitch_threshold_low=args.head_pitch_low,
-                head_yaw_threshold_low=args.head_yaw_low,
-                gaze_pitch_threshold_high=args.gaze_pitch_high,
-                gaze_yaw_threshold_high=args.gaze_yaw_high,
-                head_pitch_threshold_high=args.head_pitch_high,
-                head_yaw_threshold_high=args.head_yaw_high,
-            )
-        except Exception as exc:
-            logger.error("GazeRedirect init failed: %s", exc)
-            sys.exit(1)
+                gaze = maxine_ar_ext.GazeRedirect(
+                    width=width,
+                    height=height,
+                    model_dir=args.model_dir,
+                    cuda_stream_ptr=stream.cuda_stream,
+                    num_landmarks=args.num_landmarks,
+                    use_cuda_graph=not args.no_cuda_graph,
+                    stabilize=not args.no_stabilize,
+                    gaze_redirect=True,
+                    eye_size_sensitivity=args.eye_size_sensitivity,
+                    gaze_pitch_threshold_low=args.gaze_pitch_low,
+                    gaze_yaw_threshold_low=args.gaze_yaw_low,
+                    head_pitch_threshold_low=args.head_pitch_low,
+                    head_yaw_threshold_low=args.head_yaw_low,
+                    gaze_pitch_threshold_high=args.gaze_pitch_high,
+                    gaze_yaw_threshold_high=args.gaze_yaw_high,
+                    head_pitch_threshold_high=args.head_pitch_high,
+                    head_yaw_threshold_high=args.head_yaw_high,
+                )
+            except Exception as exc:
+                logger.error("GazeRedirect init failed: %s", exc)
+                sys.exit(1)
+        else:
+            logger.info("Gaze disabled (--no-gaze / GAZE_ENABLED=0) — eye redirect off")
 
         # Pre-allocate output BGR tensor — reused every frame (no per-frame malloc).
         out_bgr = torch.empty((height, width, 3), dtype=torch.uint8, device="cuda")
@@ -442,7 +616,7 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
             if do_breakdown:
                 t_frontalize.record_start()
 
-            flt = frontalizer.frontalize(frame_bgr)
+            flt = frontalizer.frontalize(frame_bgr) if frontalizer is not None else None
 
             if do_breakdown:
                 t_frontalize.record_end()
@@ -501,12 +675,16 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
                 if do_breakdown:
                     t_gaze.record_start()
 
-                ok = gaze.run(
-                    int(in_bgr.data_ptr()),
-                    width * 3,
-                    int(out_bgr.data_ptr()),
-                    width * 3,
-                )
+                if gaze is not None:
+                    ok = gaze.run(
+                        int(in_bgr.data_ptr()),
+                        width * 3,
+                        int(out_bgr.data_ptr()),
+                        width * 3,
+                    )
+                else:
+                    # Gaze disabled — use FLP output directly.
+                    ok = False
 
                 if do_breakdown:
                     t_gaze.record_end()
@@ -554,8 +732,8 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
                     # every time, the SDK rejected the face and gaze is
                     # NOT happening — check face_confidence.
                     try:
-                        gv = gaze.gaze_vector
-                        fc = gaze.face_confidence
+                        gv = gaze.gaze_vector if gaze is not None else (0.0, 0.0)
+                        fc = gaze.face_confidence if gaze is not None else 0.0
                     except Exception:
                         gv, fc = (0.0, 0.0), 0.0
                     logger.info(
