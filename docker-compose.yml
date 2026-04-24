@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   maxine-ar-sdk-webcam:
     image: ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest
@@ -7,11 +5,61 @@ services:
     restart: unless-stopped
     runtime: nvidia
     environment:
+      # GPU visibility for the container.
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+
+      # --- User-tunable configuration ---
+      # Every variable below inherits from the host's environment (set by
+      # the systemd unit maxine-webcam.service). Declared without a value
+      # so Docker reads the current value at `compose up` time.
+      # Pipeline toggles
+      - FLP_ENABLED
+      - GAZE_ENABLED
+      # Orientation
+      - MIRROR
+      # Devices
+      - INPUT_DEVICE
+      - OUTPUT_DEVICE
+      # Resolution + framerate
+      - OUTPUT_WIDTH
+      - OUTPUT_HEIGHT
+      - CAPTURE_WIDTH
+      - CAPTURE_HEIGHT
+      - FPS
+      # Source portrait
+      - SRC_IMAGE
+      # FLP stability + axis strength
+      - FLP_MOTION_EMA
+      - FLP_PITCH_STRENGTH
+      - FLP_YAW_STRENGTH
+      - FLP_ROLL_STRENGTH
+      # AR SDK gaze thresholds (deg)
+      - GAZE_PITCH_LOW
+      - GAZE_PITCH_HIGH
+      - GAZE_YAW_LOW
+      - GAZE_YAW_HIGH
+      - GAZE_HEAD_PITCH_LOW
+      - GAZE_HEAD_PITCH_HIGH
+      - GAZE_HEAD_YAW_LOW
+      - GAZE_HEAD_YAW_HIGH
+      # AR SDK other
+      - GAZE_LANDMARKS
+      - GAZE_EYE_SIZE
+      - GAZE_CUDA_GRAPH
+      - GAZE_STABILIZE
+      # Paths
+      - MODEL_DIR
+      - FLP_CFG
+      # Logging
+      - LOG_LEVEL
+      - PYTHONUNBUFFERED=1
     devices:
       - /dev/video0:/dev/video0
       - /dev/video10:/dev/video10
-    command: ["/usr/local/bin/maxine_ar_webcam", "--mjpeg", "/dev/video10", "1920", "1080"]
-    # Override for lower resolutions / no MJPEG:
-    # command: ["/usr/local/bin/maxine_ar_webcam", "/dev/video10", "640", "480"]
+    volumes:
+      # FLP ONNX models + TRT engines (downloaded once on host, built on first run).
+      - /opt/flp-checkpoints:/opt/flp-checkpoints
+      # User-supplied neutral frontal portrait (see setup.sh for instructions).
+      - /opt/maxine-portrait.jpg:/app/src-portrait.jpg:ro
+    # CMD is defined in the Dockerfile; no command override needed.
