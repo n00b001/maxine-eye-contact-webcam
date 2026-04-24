@@ -24,6 +24,9 @@ from collections import deque
 
 import numpy as np
 
+# cv2 is imported lazily inside the passthrough path below. Keeping it out
+# of module-level imports means the test suite (which runs on CI without
+# opencv in dev deps) can still import this module.
 # IMPORT-ORDER INVARIANT: torch MUST be imported BEFORE maxine_ar_ext.
 # The AR SDK libs and torch each bundle their own CUDA runtime symbols;
 # loading torch first registers its runtime so AR SDK's later dlopen reuses
@@ -49,9 +52,33 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--input-device", default="/dev/video0", help="V4L2 capture device")
     p.add_argument("--output-device", default="/dev/video10", help="V4L2 sink device")
-    p.add_argument("--width", type=int, default=1920, help="Frame width in pixels")
-    p.add_argument("--height", type=int, default=1080, help="Frame height in pixels")
+    p.add_argument("--width", type=int, default=1920, help="Output frame width in pixels")
+    p.add_argument("--height", type=int, default=1080, help="Output frame height in pixels")
+    # FLP internally resizes the driving frame to ~192x192 for motion
+    # extraction and does face detection on a small image; there is no
+    # benefit to capturing at 1080p. Defaulting capture to 640x480 MJPEG
+    # saves ffmpeg decode time and the H2D transfer, cutting end-to-end
+    # latency significantly. The output side still runs at --width x --height.
+    p.add_argument(
+        "--capture-width",
+        type=int,
+        default=640,
+        help="Webcam capture width (smaller = lower latency; default 640)",
+    )
+    p.add_argument(
+        "--capture-height",
+        type=int,
+        default=480,
+        help="Webcam capture height (smaller = lower latency; default 480)",
+    )
     p.add_argument("--fps", type=int, default=30, help="Capture and output frame rate")
+    p.add_argument(
+        "--mirror",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Horizontally flip output for selfie orientation (matches what most "
+        "webcam consumers expect). Use --no-mirror to keep webcam-native LR.",
+    )
     p.add_argument("--src-image", required=True, help="Path to neutral source portrait image")
     p.add_argument(
         "--model-dir",
@@ -107,17 +134,26 @@ def _build_parser() -> argparse.ArgumentParser:
 def _open_capture(
     device: str, fps: int, width: int, height: int, frame_bytes: int
 ) -> subprocess.Popen:
+    # Low-latency flags: `-fflags nobuffer` disables ffmpeg's input packet
+    # buffer (~100-200ms by default), `-flags low_delay` trims decoder
+    # reorder buffer, `-thread_queue_size 8` keeps the packet queue tiny
+    # so stale frames don't accumulate upstream of us.
     cmd = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
         "error",
+        "-fflags",
+        "nobuffer",
+        "-flags",
+        "low_delay",
+        "-thread_queue_size",
+        "8",
         "-f",
         "v4l2",
-        # Request MJPEG input: most UVC webcams only expose 1080p30 via
-        # MJPG — YUYV at 1080p is typically capped at 7.5 fps. Without an
-        # explicit input_format v4l2 will pick YUYV and the pipeline runs
-        # at the uncompressed cap.
+        # MJPEG at low res: most UVC webcams support 640x480@30 via MJPG
+        # with minimal encode delay. YUYV is uncompressed and can pin
+        # latency on USB bandwidth at higher resolutions.
         "-input_format",
         "mjpeg",
         "-framerate",
@@ -132,22 +168,37 @@ def _open_capture(
         "bgr24",
         "-",
     ]
+    # bufsize=0 on Popen gives an unbuffered pipe so readinto() returns
+    # each frame as soon as ffmpeg writes it (no Python-side buffering
+    # between ffmpeg and our main loop).
     return subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
-        bufsize=frame_bytes * 4,
+        bufsize=0,
     )
 
 
 def _open_sink(
     device: str, fps: int, width: int, height: int, frame_bytes: int
 ) -> subprocess.Popen:
+    # Output side low-latency flags mirror the capture side. `-vsync
+    # passthrough` forwards frames as fast as we write them (no CFR
+    # rate regulation), `-max_delay 0` caps the output packet delay,
+    # and `-bufsize 0` kills internal rate-control buffering.
     cmd = [
         "ffmpeg",
         "-hide_banner",
         "-loglevel",
         "error",
         "-y",
+        "-fflags",
+        "nobuffer",
+        "-flags",
+        "low_delay",
+        "-max_delay",
+        "0",
+        "-thread_queue_size",
+        "8",
         "-f",
         "rawvideo",
         "-pix_fmt",
@@ -158,6 +209,8 @@ def _open_sink(
         str(fps),
         "-i",
         "-",
+        "-vsync",
+        "passthrough",
         "-f",
         "v4l2",
         "-pix_fmt",
@@ -167,7 +220,7 @@ def _open_sink(
     return subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
-        bufsize=frame_bytes * 4,
+        bufsize=0,
     )
 
 
@@ -239,10 +292,13 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    width: int = args.width
-    height: int = args.height
+    width: int = args.width  # output (sink) width
+    height: int = args.height  # output (sink) height
+    capture_width: int = args.capture_width
+    capture_height: int = args.capture_height
     fps: int = args.fps
-    frame_bytes: int = width * height * 3  # BGR24 bytes per frame
+    capture_bytes: int = capture_width * capture_height * 3
+    output_bytes: int = width * height * 3
 
     # ------------------------------------------------------------------
     # Create the shared CUDA stream. All GPU work lives on this stream.
@@ -305,18 +361,29 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
     # ------------------------------------------------------------------
     # Open ffmpeg subprocesses.
     # ------------------------------------------------------------------
-    logger.info("Opening capture on %s (%dx%d @ %d fps)", args.input_device, width, height, fps)
-    capture = _open_capture(args.input_device, fps, width, height, frame_bytes)
+    logger.info(
+        "Opening capture on %s (%dx%d @ %d fps)",
+        args.input_device,
+        capture_width,
+        capture_height,
+        fps,
+    )
+    capture = _open_capture(args.input_device, fps, capture_width, capture_height, capture_bytes)
 
-    logger.info("Opening sink on %s", args.output_device)
-    sink = _open_sink(args.output_device, fps, width, height, frame_bytes)
+    logger.info("Opening sink on %s (%dx%d)", args.output_device, width, height)
+    sink = _open_sink(args.output_device, fps, width, height, output_bytes)
 
     _install_signal_handlers(capture, sink)
 
     # ------------------------------------------------------------------
     # Per-frame read buffer (reused, no allocation in the hot loop).
+    # Sized for the CAPTURE dimensions, which may be smaller than the
+    # output dimensions for latency reasons.
     # ------------------------------------------------------------------
-    read_buf = bytearray(frame_bytes)
+    read_buf = bytearray(capture_bytes)
+    # Scratch for passthrough upscaling (cv2.resize into a pre-allocated
+    # numpy buffer is faster than allocating each frame).
+    passthrough_buf = np.empty((height, width, 3), dtype=np.uint8)
 
     # Timing state.
     fps_window: deque[float] = deque(maxlen=30)
@@ -334,16 +401,33 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
     while True:
         # ----------------------------------------------------------------
         # Step 1: Read one raw BGR24 frame from capture ffmpeg.
+        #
+        # bufsize=0 + `-fflags nobuffer` makes readinto() return whatever
+        # is immediately available, which is usually less than a full
+        # frame on the first read. Loop into a memoryview slice until we
+        # have capture_bytes total — or EOF, in which case we stop cleanly.
         # ----------------------------------------------------------------
-        n = capture.stdout.readinto(read_buf)
-        if n != frame_bytes:
+        mv = memoryview(read_buf)
+        total = 0
+        eof = False
+        while total < capture_bytes:
+            n = capture.stdout.readinto(mv[total:])
+            if n == 0:
+                eof = True
+                break
+            total += n
+        if eof:
             logger.warning(
-                "ffmpeg capture short-read: got %d of %d bytes — stopping", n, frame_bytes
+                "ffmpeg capture EOF after %d of %d bytes — stopping",
+                total,
+                capture_bytes,
             )
             break
 
-        # Zero-copy numpy view of the read buffer.
-        frame_bgr = np.frombuffer(read_buf, dtype=np.uint8).reshape(height, width, 3)
+        # Zero-copy numpy view of the read buffer at CAPTURE resolution.
+        frame_bgr = np.frombuffer(read_buf, dtype=np.uint8).reshape(
+            capture_height, capture_width, 3
+        )
 
         t_now = time.monotonic()
         fps_window.append(t_now - t_prev)
@@ -432,6 +516,15 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
                 chosen = out_bgr if ok else in_bgr
 
                 # --------------------------------------------------------
+                # Optional horizontal mirror for selfie orientation.
+                # Applied LAST (after gaze) so AR SDK works in webcam-native
+                # coordinates — mirroring before gaze would make the SDK's
+                # landmarks point at the wrong side of the face.
+                # --------------------------------------------------------
+                if args.mirror:
+                    chosen = chosen.flip(1).contiguous()
+
+                # --------------------------------------------------------
                 # Step 6: D2H — single transfer per frame.
                 # .cpu() implicitly synchronises the stream for this tensor.
                 # --------------------------------------------------------
@@ -454,22 +547,48 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
                     ms_front = t_frontalize.elapsed_ms()
                     ms_flip = t_flip_cast.elapsed_ms()
                     ms_gz = t_gaze.elapsed_ms()
+                    # Log gaze diagnostics so we can tell whether the SDK
+                    # actually redirected eyes (face_confidence > threshold
+                    # AND gaze_vector != (0,0)) or just passed the frame
+                    # through unchanged. If you see gaze_vec=(0.0, 0.0)
+                    # every time, the SDK rejected the face and gaze is
+                    # NOT happening — check face_confidence.
+                    try:
+                        gv = gaze.gaze_vector
+                        fc = gaze.face_confidence
+                    except Exception:
+                        gv, fc = (0.0, 0.0), 0.0
                     logger.info(
                         "Stage breakdown [frame %d]: "
                         "frontalize=%.2f ms  flip+clamp+cast=%.2f ms  "
-                        "gaze=%.2f ms",
+                        "gaze=%.2f ms  ok=%s  face_conf=%.2f  gaze_vec=(%.2f, %.2f)",
                         frame_idx,
                         ms_front,
                         ms_flip,
                         ms_gz,
+                        ok,
+                        fc,
+                        gv[0],
+                        gv[1],
                     )
 
                 frame_idx += 1
                 continue
 
-        # Passthrough path: write the original numpy frame (no GPU upload).
+        # Passthrough path: no face detected, so no GPU round-trip needed.
+        # Resize to output dims on CPU (cv2.resize is very fast for this)
+        # and optionally mirror. Sink always writes at (height, width).
+        import cv2  # lazy: only imported when we actually run the pipeline
+
+        if capture_width != width or capture_height != height:
+            cv2.resize(frame_bgr, (width, height), dst=passthrough_buf)
+            pt = passthrough_buf
+        else:
+            pt = frame_bgr
+        if args.mirror:
+            pt = cv2.flip(pt, 1)
         try:
-            sink.stdin.write(bytes(read_buf))
+            sink.stdin.write(pt.tobytes())
         except BrokenPipeError:
             logger.warning("Sink stdin broken — stopping")
             break

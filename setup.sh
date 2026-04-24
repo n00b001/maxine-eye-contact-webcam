@@ -143,7 +143,7 @@ ok "System dependencies installed"
 # ---------------------------------------------------------------------------
 info "Configuring v4l2loopback (video10=output)..."
 V4L2_CONF="/etc/modprobe.d/v4l2loopback.conf"
-DESIRED='options v4l2loopback devices=1 video_nr=10 card_label="MaxineEyeContact" exclusive_caps=1 max_buffers=4'
+DESIRED='options v4l2loopback devices=1 video_nr=10 card_label="MaxineEyeContact" exclusive_caps=1 max_buffers=2'
 if [ "$(cat "$V4L2_CONF" 2>/dev/null || true)" != "$DESIRED" ]; then
     echo "$DESIRED" | sudo tee "$V4L2_CONF" > /dev/null
     ok "Updated $V4L2_CONF"
