@@ -168,6 +168,33 @@ def _capture_source_pose(pipe) -> None:
         logger.warning("Could not capture source pose for axis-strength blend: %s", exc)
 
 
+def headpose_predict_to_rotation_matrix(headpose: torch.Tensor) -> torch.Tensor:
+    """
+    Convert FLP headpose (pitch, yaw, roll) tensor to rotation matrix R.
+    Expects headpose in shape (B, 3) or (3,).
+    """
+    if headpose.ndim == 1:
+        headpose = headpose.unsqueeze(0)
+    res = torch.zeros((headpose.shape[0], 3, 3), device=headpose.device, dtype=headpose.dtype)
+
+    sin = torch.sin(headpose)
+    cos = torch.cos(headpose)
+
+    # ZYX rotation (standard for FLP)
+    # R = R_z * R_y * R_x
+    res[:, 0, 0] = cos[:, 1] * cos[:, 2]
+    res[:, 0, 1] = sin[:, 0] * sin[:, 1] * cos[:, 2] - cos[:, 0] * sin[:, 2]
+    res[:, 0, 2] = cos[:, 0] * sin[:, 1] * cos[:, 2] + sin[:, 0] * sin[:, 2]
+    res[:, 1, 0] = cos[:, 1] * sin[:, 2]
+    res[:, 1, 1] = sin[:, 0] * sin[:, 1] * sin[:, 2] + cos[:, 0] * cos[:, 2]
+    res[:, 1, 2] = cos[:, 0] * sin[:, 1] * sin[:, 2] - sin[:, 0] * cos[:, 2]
+    res[:, 2, 0] = -sin[:, 1]
+    res[:, 2, 1] = sin[:, 0] * cos[:, 1]
+    res[:, 2, 2] = cos[:, 0] * cos[:, 1]
+
+    return res
+
+
 def _install_axis_strength(pipe, strengths: tuple) -> None:
     """Blend each axis of motion_extractor output toward the source pose."""
     sp, sy, sr = strengths
@@ -192,6 +219,19 @@ def _install_axis_strength(pipe, strengths: tuple) -> None:
             r_out = (1.0 - sr) * r + sr * src_r
         except (TypeError, ValueError):
             return result
+
+        # Force re-computation of the rotation matrix R from the corrected euler
+        # angles if R was in the original result.
+        # FLP's result tuple typically has R at index 7 if present.
+        if len(result) > 7:
+            # We recompute R and update the tuple to keep it consistent.
+            new_headpose = torch.stack([p_out, y_out, r_out], dim=-1)
+            new_r = headpose_predict_to_rotation_matrix(new_headpose)
+            res_list = list(result)
+            res_list[0], res_list[1], res_list[2] = p_out, y_out, r_out
+            res_list[7] = new_r
+            return tuple(res_list)
+
         return (p_out, y_out, r_out, t, exp_, scale, kp)
 
     ex.predict = blend
@@ -270,13 +310,16 @@ class FLPFrontalizer:
         self._load_source(src_image_path)
         _reset_motion_smoothing()
 
-    def frontalize(self, frame_bgr: np.ndarray) -> torch.Tensor | None:
+    def frontalize(self, frame_bgr: np.ndarray, overlay: bool = True) -> torch.Tensor | None:
         """Drive FLP with the current webcam frame.
 
         Parameters
         ----------
         frame_bgr:
             (H, W, 3) BGR uint8 numpy array — the current webcam frame.
+        overlay:
+            If true, paste the animated face back into the live webcam
+            stream. If false, overwrite with the source portrait background.
 
         Returns
         -------
@@ -299,12 +342,16 @@ class FLPFrontalizer:
         # can't leak through on a no-face frame.
         _last_paste_back[0] = None
 
+        # When overlay=True, we use the live webcam frame as the background.
+        # FLP's run() uses the second argument as the background for paste-back.
+        background = frame_bgr if overlay else self._img_src
+
         # Don't pass realtime= as kwarg — FLP's run() threads it positionally
         # into _run() internally, so a kwarg here causes a duplicate-argument
         # TypeError. FLP defaults work correctly for our continuous capture.
         result = self._pipe.run(
             frame_bgr,
-            self._img_src,
+            background,
             self._src_info,
         )
         _img_crop, _out_crop, i_p_pstbk_numpy, _motion = result

@@ -23,6 +23,9 @@ TimeoutStartSec=900
 # Set to 0 to disable. Both on by default.
 Environment="FLP_ENABLED=1"
 Environment="GAZE_ENABLED=1"
+# 1 = paste animated face back into live webcam stream (overlay).
+# 0 = overwrite video with source portrait (overwrite).
+Environment="OVERLAY_ENABLED=1"
 
 # ---------------- Video orientation ----------------
 # 1 = horizontally flip the output (selfie orientation). 0 = webcam-native LR.

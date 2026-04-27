@@ -168,6 +168,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=_env_bool("GAZE_ENABLED", True),
         help="Enable NVIDIA AR SDK gaze redirection (env: GAZE_ENABLED=0|1)",
     )
+    p.add_argument(
+        "--overlay",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("OVERLAY_ENABLED", True),
+        help=(
+            "If true, paste the animated face back into the live webcam "
+            "stream (overlay). If false, overwrite the video with the "
+            "source portrait (overwrite). (env: OVERLAY_ENABLED=0|1)"
+        ),
+    )
 
     # ---------------- FLP stability + per-axis strength ----------------
     p.add_argument(
@@ -616,27 +626,39 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
             if do_breakdown:
                 t_frontalize.record_start()
 
-            flt = frontalizer.frontalize(frame_bgr) if frontalizer is not None else None
+            flt = None
+            if frontalizer is not None:
+                flt = frontalizer.frontalize(frame_bgr, overlay=args.overlay)
 
             if do_breakdown:
                 t_frontalize.record_end()
 
+            in_bgr = None
             if flt is None:
-                # No face detected — passthrough original frame bytes.
-                # We write the numpy bytes directly (no GPU round-trip needed).
-                pass
+                # No face detected OR FLP disabled: we still want Gaze
+                # Redirection to work on the raw webcam feed if enabled.
+                if gaze is not None:
+                    # Upload raw frame to GPU. permute(2,0,1) is HWC->CHW.
+                    # interpolate expects (B, C, H, W) float.
+                    t_raw = torch.from_numpy(frame_bgr).to(device="cuda", non_blocking=True)
+                    in_bgr = (
+                        torch.nn.functional.interpolate(
+                            t_raw.permute(2, 0, 1).unsqueeze(0).float(),
+                            size=(height, width),
+                            mode="bilinear",
+                            align_corners=False,
+                        )
+                        .squeeze(0)
+                        .permute(1, 2, 0)
+                        .to(torch.uint8)
+                        .contiguous()
+                    )
             else:
                 # --------------------------------------------------------
-                # FLP paste-back follows the SOURCE PORTRAIT's native size
-                # (after internal resize_to_limit), not the webcam frame
-                # size. When --src-image is 740x576 but --width/--height
-                # are 1920x1080, flt.shape = (576, 740, 3) and the SDK,
-                # which was allocated at 1920x1080, rejects the pointer
-                # with "AR SDK Run: invalid argument". Upscale (bilinear,
-                # on-stream) so the gaze input matches the allocated size.
+                # FLP paste-back follows the SOURCE PORTRAIT's native size.
+                # Upscale so the gaze input matches the allocated size.
                 # --------------------------------------------------------
                 if flt.shape[0] != height or flt.shape[1] != width:
-                    # (H, W, 3) -> (1, 3, H, W) for interpolate, then back.
                     flt_nchw = flt.permute(2, 0, 1).unsqueeze(0)
                     flt_nchw = torch.nn.functional.interpolate(
                         flt_nchw,
@@ -648,18 +670,6 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
 
                 # --------------------------------------------------------
                 # Step 3: RGB float32 HWC -> BGR uint8 HWC, on-stream.
-                #
-                # flt shape: (H, W, 3), float32, RGB, values in [0, 255].
-                # .flip(-1)   — channel axis: RGB -> BGR
-                # .clamp(0, 255) — guard paste-back overshoot
-                # .to(uint8)  — cast in one op
-                # .contiguous() — ensure row-major interleaved for SDK
-                #
-                # We use inline torch ops rather than gpu_format_convert
-                # because gpu_format_convert.rgb_f32_planar_to_bgr_u8_chunky
-                # expects (1, 3, H, W) planar float32 scaled to [0, 1],
-                # which is NOT what FLP gives us. A reshape + scale just to
-                # call that helper would cost more than doing it inline.
                 # --------------------------------------------------------
                 if do_breakdown:
                     t_flip_cast.record_start()
@@ -669,9 +679,10 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
                 if do_breakdown:
                     t_flip_cast.record_end()
 
-                # --------------------------------------------------------
-                # Steps 4-5: Gaze redirect.
-                # --------------------------------------------------------
+            # ------------------------------------------------------------
+            # Step 4-5: Gaze redirect (runs if we have a GPU tensor).
+            # ------------------------------------------------------------
+            if in_bgr is not None:
                 if do_breakdown:
                     t_gaze.record_start()
 
@@ -683,29 +694,19 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
                         width * 3,
                     )
                 else:
-                    # Gaze disabled — use FLP output directly.
                     ok = False
 
                 if do_breakdown:
                     t_gaze.record_end()
 
                 # Choose winner: gaze output if SDK accepted the frame,
-                # otherwise the head-pose-corrected frame.
+                # otherwise the head-pose-corrected frame (or raw webcam).
                 chosen = out_bgr if ok else in_bgr
 
-                # --------------------------------------------------------
-                # Optional horizontal mirror for selfie orientation.
-                # Applied LAST (after gaze) so AR SDK works in webcam-native
-                # coordinates — mirroring before gaze would make the SDK's
-                # landmarks point at the wrong side of the face.
-                # --------------------------------------------------------
                 if args.mirror:
                     chosen = chosen.flip(1).contiguous()
 
-                # --------------------------------------------------------
-                # Step 6: D2H — single transfer per frame.
-                # .cpu() implicitly synchronises the stream for this tensor.
-                # --------------------------------------------------------
+                # Step 6: D2H
                 cpu_bytes = chosen.cpu().numpy().tobytes()
 
                 try:
@@ -714,23 +715,15 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
                     logger.warning("Sink stdin broken — stopping")
                     break
 
-                # FPS log every 30 frames.
                 if len(fps_window) == 30:
                     avg_dt = sum(fps_window) / len(fps_window)
                     if frame_idx % 30 == 0 and avg_dt > 0:
                         logger.info("%.1f fps", 1.0 / avg_dt)
 
-                # Stage breakdown every 300 frames (sync cost accepted here).
                 if do_breakdown:
                     ms_front = t_frontalize.elapsed_ms()
-                    ms_flip = t_flip_cast.elapsed_ms()
+                    ms_flip = t_flip_cast.elapsed_ms() if flt is not None else 0.0
                     ms_gz = t_gaze.elapsed_ms()
-                    # Log gaze diagnostics so we can tell whether the SDK
-                    # actually redirected eyes (face_confidence > threshold
-                    # AND gaze_vector != (0,0)) or just passed the frame
-                    # through unchanged. If you see gaze_vec=(0.0, 0.0)
-                    # every time, the SDK rejected the face and gaze is
-                    # NOT happening — check face_confidence.
                     try:
                         gv = gaze.gaze_vector if gaze is not None else (0.0, 0.0)
                         fc = gaze.face_confidence if gaze is not None else 0.0
@@ -753,9 +746,9 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
                 frame_idx += 1
                 continue
 
-        # Passthrough path: no face detected, so no GPU round-trip needed.
-        # Resize to output dims on CPU (cv2.resize is very fast for this)
-        # and optionally mirror. Sink always writes at (height, width).
+        # Passthrough path: no face detected AND Gaze failed/disabled,
+        # OR both FLP and Gaze explicitly disabled. No GPU round-trip
+        # needed for this frame.
         import cv2  # lazy: only imported when we actually run the pipeline
 
         if capture_width != width or capture_height != height:
