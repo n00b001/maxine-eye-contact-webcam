@@ -207,6 +207,7 @@ def _install_axis_strength(pipe, strengths: tuple) -> None:
 
     def blend(*data, **kwargs):
         result = list(inner(*data, **kwargs))
+        result = inner(*data, **kwargs)
         src = _source_pose[0]
         if src is None or len(result) < 7:
             return result
@@ -230,6 +231,7 @@ def _install_axis_strength(pipe, strengths: tuple) -> None:
             new_r = headpose_predict_to_rotation_matrix(new_headpose)
             return (p_out, y_out, r_out, t, exp_, scale, kp, new_r, *result[8:])
 
+            return result
         return (p_out, y_out, r_out, t, exp_, scale, kp)
 
     ex.predict = blend
@@ -309,6 +311,7 @@ class FLPFrontalizer:
         _reset_motion_smoothing()
 
     def frontalize(self, frame_bgr: np.ndarray, overlay: bool = True) -> torch.Tensor | None:
+    def frontalize(self, frame_bgr: np.ndarray) -> torch.Tensor | None:
         """Drive FLP with the current webcam frame.
 
         Parameters
@@ -350,6 +353,7 @@ class FLPFrontalizer:
         result = self._pipe.run(
             frame_bgr,
             background,
+            self._img_src,
             self._src_info,
         )
         _img_crop, _out_crop, i_p_pstbk_numpy, _motion = result

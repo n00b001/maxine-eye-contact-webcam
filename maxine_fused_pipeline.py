@@ -629,6 +629,7 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
             flt = None
             if frontalizer is not None:
                 flt = frontalizer.frontalize(frame_bgr, overlay=args.overlay)
+            flt = frontalizer.frontalize(frame_bgr) if frontalizer is not None else None
 
             if do_breakdown:
                 t_frontalize.record_end()
@@ -653,6 +654,10 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
                         .to(torch.uint8)
                         .contiguous()
                     )
+            if flt is None:
+                # No face detected — passthrough original frame bytes.
+                # We write the numpy bytes directly (no GPU round-trip needed).
+                pass
             else:
                 # --------------------------------------------------------
                 # FLP paste-back follows the SOURCE PORTRAIT's native size
@@ -701,6 +706,9 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
             # Step 4-5: Gaze redirect (runs if we have a GPU tensor).
             # ------------------------------------------------------------
             if in_bgr is not None:
+                # --------------------------------------------------------
+                # Steps 4-5: Gaze redirect.
+                # --------------------------------------------------------
                 if do_breakdown:
                     t_gaze.record_start()
 
@@ -713,6 +721,7 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
                     )
                 else:
                     # Gaze disabled — use FLP/raw input directly.
+                    # Gaze disabled — use FLP output directly.
                     ok = False
 
                 if do_breakdown:
@@ -725,6 +734,9 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
                 # If FLP was disabled/failed but Gaze succeeded, 'chosen'
                 # is out_bgr (redirected raw webcam). If Gaze also failed,
                 # we'll still end up here with 'chosen' as in_bgr (raw webcam).
+
+                # otherwise the head-pose-corrected frame.
+                chosen = out_bgr if ok else in_bgr
 
                 # --------------------------------------------------------
                 # Optional horizontal mirror for selfie orientation.
@@ -757,6 +769,7 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
                 if do_breakdown:
                     ms_front = t_frontalize.elapsed_ms()
                     ms_flip = t_flip_cast.elapsed_ms() if flt is not None else 0.0
+                    ms_flip = t_flip_cast.elapsed_ms()
                     ms_gz = t_gaze.elapsed_ms()
                     # Log gaze diagnostics so we can tell whether the SDK
                     # actually redirected eyes (face_confidence > threshold
@@ -789,6 +802,7 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
         # Passthrough path: no face detected AND Gaze failed/disabled,
         # OR both FLP and Gaze explicitly disabled. No GPU round-trip
         # needed for this frame.
+        # Passthrough path: no face detected, so no GPU round-trip needed.
         # Resize to output dims on CPU (cv2.resize is very fast for this)
         # and optionally mirror. Sink always writes at (height, width).
         import cv2  # lazy: only imported when we actually run the pipeline
