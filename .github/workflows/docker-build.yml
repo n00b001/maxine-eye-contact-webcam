@@ -32,9 +32,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up uv
-        uses: astral-sh/setup-uv@v3
-        with:
-          version: "0.5.x"
+        uses: astral-sh/setup-uv@v5
       - name: Install dependencies
         run: uv sync --all-groups
       - name: Run ruff check (pre-commit parity)
@@ -111,7 +109,7 @@ jobs:
           build-args: |
             ARSDK_BASE=${{ env.BASE_IMAGE }}
 
-      - name: Generate artifact attestation
+      - name: Generate artifact attestations
         uses: actions/attest-build-provenance@v1
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}

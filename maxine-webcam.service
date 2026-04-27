@@ -34,6 +34,9 @@ Environment="MIRROR=1"
 # ---------------- Devices ----------------
 Environment="INPUT_DEVICE=/dev/video0"
 Environment="OUTPUT_DEVICE=/dev/video10"
+# Optional device for the original unchanged video (for comparison).
+# Set to a /dev/videoX path to enable.
+Environment="OUTPUT_DEVICE_RAW="
 
 # ---------------- Resolution + framerate ----------------
 # OUTPUT_WIDTH/HEIGHT = size of frames written to /dev/video10 (what

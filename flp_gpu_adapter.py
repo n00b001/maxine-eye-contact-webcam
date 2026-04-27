@@ -71,6 +71,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _last_paste_back: list[torch.Tensor | None] = [None]
+_target_background: list[torch.Tensor | np.ndarray | None] = [None]
 _original_paste_back = _flp_pipe_mod.paste_back_pytorch
 
 
@@ -82,7 +83,14 @@ def _intercepting_paste_back(img_crop, M_c2o, img_ori, mask_ori):  # noqa: N803
     to that tensor so downstream stages (format conversion, AR SDK gaze
     redirect) can consume its device pointer directly.
     """
-    result = _original_paste_back(img_crop, M_c2o, img_ori, mask_ori)
+    # Use our forced background if provided (Overlay/Overwrite support)
+    bg = _target_background[0] if _target_background[0] is not None else img_ori
+
+    # If the forced background is a numpy array (from live webcam), upload it.
+    if isinstance(bg, np.ndarray):
+        bg = torch.from_numpy(bg).to(device=img_crop.device, non_blocking=True).float()
+
+    result = _original_paste_back(img_crop, M_c2o, bg, mask_ori)
     _last_paste_back[0] = result
     return result
 
@@ -102,6 +110,10 @@ _flp_pipe_mod.paste_back_pytorch = _intercepting_paste_back
 # MAXINE_FLP_MOTION_EMA env var: 1.0 = smoothing off (raw FLP output),
 # 0.3 default = ~65 ms half-response at 30 fps (stable but responsive),
 # 0.1 = very smooth but noticeably laggy.
+#
+# SELECTIVE SMOOTHING:
+# Mouth, eyes, and eyebrows (expression parameters) are NOT smoothed,
+# allowing them to react instantly without delay or trailing artifacts.
 # ---------------------------------------------------------------------------
 
 _motion_prev: list = [None]
@@ -109,6 +121,33 @@ _motion_prev: list = [None]
 
 def _reset_motion_smoothing() -> None:
     _motion_prev[0] = None
+
+
+def headpose_predict_to_rotation_matrix(headpose: torch.Tensor) -> torch.Tensor:
+    """
+    Convert FLP headpose (pitch, yaw, roll) tensor to rotation matrix R.
+    Expects headpose in shape (B, 3) or (3,).
+    """
+    if headpose.ndim == 1:
+        headpose = headpose.unsqueeze(0)
+    res = torch.zeros((headpose.shape[0], 3, 3), device=headpose.device, dtype=headpose.dtype)
+
+    sin = torch.sin(headpose)
+    cos = torch.cos(headpose)
+
+    # ZYX rotation (standard for FLP)
+    # R = R_z * R_y * R_x
+    res[:, 0, 0] = cos[:, 1] * cos[:, 2]
+    res[:, 0, 1] = sin[:, 0] * sin[:, 1] * cos[:, 2] - cos[:, 0] * sin[:, 2]
+    res[:, 0, 2] = cos[:, 0] * sin[:, 1] * cos[:, 2] + sin[:, 0] * sin[:, 2]
+    res[:, 1, 0] = cos[:, 1] * sin[:, 2]
+    res[:, 1, 1] = sin[:, 0] * sin[:, 1] * sin[:, 2] + cos[:, 0] * cos[:, 2]
+    res[:, 1, 2] = cos[:, 0] * sin[:, 1] * sin[:, 2] - sin[:, 0] * cos[:, 2]
+    res[:, 2, 0] = -sin[:, 1]
+    res[:, 2, 1] = sin[:, 0] * cos[:, 1]
+    res[:, 2, 2] = cos[:, 0] * cos[:, 1]
+
+    return res
 
 
 def _install_motion_smoothing(pipe, alpha: float) -> None:
@@ -129,15 +168,34 @@ def _install_motion_smoothing(pipe, alpha: float) -> None:
         if prev is None or len(prev) != len(current):
             _motion_prev[0] = current
             return current
+
+        # current tuple: (pitch, yaw, roll, t, exp, scale, kp, R)
+        # indices: 0:pitch, 1:yaw, 2:roll, 3:t, 4:exp, 5:scale, 6:kp, 7:R
+
+        # We ONLY smooth head pose and scale (stable parameters)
+        # 4 (expression) and 6 (keypoints) are passed through raw.
         a = alpha
         try:
-            blended = tuple(a * c + (1.0 - a) * p for c, p in zip(current, prev, strict=False))
+            res_list = list(current)
+            # Smooth pitch, yaw, roll
+            for i in [0, 1, 2]:
+                res_list[i] = a * current[i] + (1.0 - a) * prev[i]
+            # Smooth translation
+            res_list[3] = a * current[3] + (1.0 - a) * prev[3]
+            # Smooth scale
+            res_list[5] = a * current[5] + (1.0 - a) * prev[5]
+
+            # Recompute R if it exists
+            if len(res_list) > 7:
+                new_headpose = torch.stack([res_list[0], res_list[1], res_list[2]], dim=-1)
+                res_list[7] = headpose_predict_to_rotation_matrix(new_headpose)
+
+            new_motion = tuple(res_list)
         except (TypeError, ValueError):
-            # If any element isn't array-like, fall back to the raw output.
-            _motion_prev[0] = current
-            return current
-        _motion_prev[0] = blended
-        return blended
+            new_motion = current
+
+        _motion_prev[0] = new_motion
+        return new_motion
 
     ex.predict = smoothed
     ex._smoothed = True
@@ -168,33 +226,6 @@ def _capture_source_pose(pipe) -> None:
         logger.warning("Could not capture source pose for axis-strength blend: %s", exc)
 
 
-def headpose_predict_to_rotation_matrix(headpose: torch.Tensor) -> torch.Tensor:
-    """
-    Convert FLP headpose (pitch, yaw, roll) tensor to rotation matrix R.
-    Expects headpose in shape (B, 3) or (3,).
-    """
-    if headpose.ndim == 1:
-        headpose = headpose.unsqueeze(0)
-    res = torch.zeros((headpose.shape[0], 3, 3), device=headpose.device, dtype=headpose.dtype)
-
-    sin = torch.sin(headpose)
-    cos = torch.cos(headpose)
-
-    # ZYX rotation (standard for FLP)
-    # R = R_z * R_y * R_x
-    res[:, 0, 0] = cos[:, 1] * cos[:, 2]
-    res[:, 0, 1] = sin[:, 0] * sin[:, 1] * cos[:, 2] - cos[:, 0] * sin[:, 2]
-    res[:, 0, 2] = cos[:, 0] * sin[:, 1] * cos[:, 2] + sin[:, 0] * sin[:, 2]
-    res[:, 1, 0] = cos[:, 1] * sin[:, 2]
-    res[:, 1, 1] = sin[:, 0] * sin[:, 1] * sin[:, 2] + cos[:, 0] * cos[:, 2]
-    res[:, 1, 2] = cos[:, 0] * sin[:, 1] * sin[:, 2] - sin[:, 0] * cos[:, 2]
-    res[:, 2, 0] = -sin[:, 1]
-    res[:, 2, 1] = sin[:, 0] * cos[:, 1]
-    res[:, 2, 2] = cos[:, 0] * cos[:, 1]
-
-    return res
-
-
 def _install_axis_strength(pipe, strengths: tuple) -> None:
     """Blend each axis of motion_extractor output toward the source pose."""
     sp, sy, sr = strengths
@@ -212,27 +243,22 @@ def _install_axis_strength(pipe, strengths: tuple) -> None:
             return result
         src_p, src_y, src_r = src
         p, y, r = result[0], result[1], result[2]
-        t, exp_, scale, kp = result[3], result[4], result[5], result[6]
         try:
             p_out = (1.0 - sp) * p + sp * src_p
             y_out = (1.0 - sy) * y + sy * src_y
             r_out = (1.0 - sr) * r + sr * src_r
-        except (TypeError, ValueError):
-            return result
 
-        # Force re-computation of the rotation matrix R from the corrected euler
-        # angles if R was in the original result.
-        # FLP's result tuple typically has R at index 7 if present.
-        if len(result) > 7:
-            # We recompute R and update the tuple to keep it consistent.
-            new_headpose = torch.stack([p_out, y_out, r_out], dim=-1)
-            new_r = headpose_predict_to_rotation_matrix(new_headpose)
             res_list = list(result)
             res_list[0], res_list[1], res_list[2] = p_out, y_out, r_out
-            res_list[7] = new_r
-            return tuple(res_list)
 
-        return (p_out, y_out, r_out, t, exp_, scale, kp)
+            # Recompute R matrix for consistency
+            if len(result) > 7:
+                new_headpose = torch.stack([p_out, y_out, r_out], dim=-1)
+                res_list[7] = headpose_predict_to_rotation_matrix(new_headpose)
+
+            return tuple(res_list)
+        except (TypeError, ValueError):
+            return result
 
     ex.predict = blend
     ex._axis_blended = True
@@ -268,6 +294,9 @@ class FLPFrontalizer:
         torch.cuda.set_device(self._device)
 
         cfg = OmegaConf.load(cfg_path)
+        # Enable relative motion to fix "texture locking" / global coordinate issues
+        cfg.flag_relative_motion = True
+
         self._pipe = FasterLivePortraitPipeline(cfg=cfg)
 
         self._img_src: np.ndarray | None = None
@@ -278,6 +307,7 @@ class FLPFrontalizer:
         if src_image_path is not None:
             self._load_source(src_image_path)
 
+        # Install motion smoothing AFTER _load_source.
         # Install motion smoothing AFTER _load_source so the source-image
         # motion extraction isn't blended with driving-frame extractions.
         # Reset the EMA state so the first driving frame starts clean.
@@ -289,6 +319,7 @@ class FLPFrontalizer:
         )
         _install_motion_smoothing(self._pipe, alpha=alpha)
 
+        # Capture source pose + install per-axis strength blend.
         # Capture source pose + install per-axis strength blend. Order
         # matters: smoothing first (inner), axis-strength on top (outer).
         _capture_source_pose(self._pipe)
@@ -338,9 +369,11 @@ class FLPFrontalizer:
                 "Source image not set. Call set_source() or pass src_image_path to __init__."
             )
 
-        # Clear the interception slot so a stale tensor from a previous frame
-        # can't leak through on a no-face frame.
         _last_paste_back[0] = None
+        # Stash the background so our intercepting paste_back can find it.
+        # FLP's internal .run() often ignores its second argument and uses
+        # the original source image's background; we force it here.
+        _target_background[0] = frame_bgr if overlay else self._img_src
 
         # When overlay=True, we use the live webcam frame as the background.
         # FLP's run() uses the second argument as the background for paste-back.
@@ -359,10 +392,7 @@ class FLPFrontalizer:
         if i_p_pstbk_numpy is None or _last_paste_back[0] is None:
             self._no_face_streak += 1
             if self._no_face_streak % self._no_face_log_interval == 1:
-                logger.warning(
-                    "FLP: no face for %d consecutive frames",
-                    self._no_face_streak,
-                )
+                logger.warning("FLP: no face for %d consecutive frames", self._no_face_streak)
             return None
 
         self._no_face_streak = 0

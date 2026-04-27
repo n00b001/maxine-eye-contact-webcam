@@ -95,6 +95,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="V4L2 sink device (env: OUTPUT_DEVICE)",
     )
     p.add_argument(
+        "--output-device-raw",
+        default=_env("OUTPUT_DEVICE_RAW", None),
+        help="V4L2 sink device for raw video side-by-side comparison (env: OUTPUT_DEVICE_RAW)",
+    )
+    p.add_argument(
         "--width",
         type=int,
         default=_env_int("OUTPUT_WIDTH", 1920),
@@ -399,20 +404,21 @@ def _open_sink(
 # ---------------------------------------------------------------------------
 
 
-def _install_signal_handlers(capture: subprocess.Popen, sink: subprocess.Popen) -> None:
-    """Install SIGTERM/SIGINT handlers that drain the sink and propagate."""
+def _install_signal_handlers(capture: subprocess.Popen, sinks: list[subprocess.Popen]) -> None:
+    """Install SIGTERM/SIGINT handlers that drain the sinks and propagate."""
 
     def _handler(signum: int, _frame) -> None:
         logger.info("Signal %d received — shutting down", signum)
         # Close sink stdin to flush any buffered frames.
-        try:
-            if sink.stdin:
-                sink.stdin.close()
-        except OSError:
-            pass
-        # Give both children up to 5 s to exit.
+        for sink in sinks:
+            try:
+                if sink.stdin:
+                    sink.stdin.close()
+            except OSError:
+                pass
+        # Give children up to 5 s to exit.
         deadline = time.monotonic() + 5.0
-        for proc in (sink, capture):
+        for proc in sinks + [capture]:
             remaining = max(0.0, deadline - time.monotonic())
             try:
                 proc.wait(timeout=remaining)
@@ -438,17 +444,23 @@ class _StageTimer:
         self.name = name
         self._start = torch.cuda.Event(enable_timing=True)
         self._end = torch.cuda.Event(enable_timing=True)
+        self._recorded = False
 
     def record_start(self) -> None:
         self._start.record()
+        self._recorded = True
 
     def record_end(self) -> None:
         self._end.record()
 
     def elapsed_ms(self) -> float:
         """Synchronise and return elapsed milliseconds. Only call in the breakdown path."""
+        if not self._recorded:
+            return 0.0
         self._end.synchronize()
-        return self._start.elapsed_time(self._end)
+        ms = self._start.elapsed_time(self._end)
+        self._recorded = False
+        return ms
 
 
 # ---------------------------------------------------------------------------
@@ -474,6 +486,12 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
     # Create the shared CUDA stream. All GPU work lives on this stream.
     # ------------------------------------------------------------------
     stream = torch.cuda.Stream()
+
+    # Pre-initialize CUDA context by touching the GPU. This prevents AR
+    # SDK's GazeRedirect (which uses its own dlopen path) from racing
+    # torch's symbol registration.
+    torch.cuda.set_device(0)
+    torch.empty(1, device="cuda")
 
     with torch.cuda.stream(stream):
         # ------------------------------------------------------------------
@@ -556,8 +574,15 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
 
     logger.info("Opening sink on %s (%dx%d)", args.output_device, width, height)
     sink = _open_sink(args.output_device, fps, width, height, output_bytes)
+    sinks = [sink]
 
-    _install_signal_handlers(capture, sink)
+    sink_raw = None
+    if args.output_device_raw:
+        logger.info("Opening raw comparison sink on %s", args.output_device_raw)
+        sink_raw = _open_sink(args.output_device_raw, fps, width, height, output_bytes)
+        sinks.append(sink_raw)
+
+    _install_signal_handlers(capture, sinks)
 
     # ------------------------------------------------------------------
     # Per-frame read buffer (reused, no allocation in the hot loop).
@@ -654,6 +679,7 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
                         .contiguous()
                     )
             else:
+                # Upscale so the gaze input matches the allocated size.
                 # --------------------------------------------------------
                 # FLP paste-back follows the SOURCE PORTRAIT's native size.
                 # Upscale so the gaze input matches the allocated size.
@@ -668,9 +694,7 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
                     )
                     flt = flt_nchw.squeeze(0).permute(1, 2, 0)
 
-                # --------------------------------------------------------
                 # Step 3: RGB float32 HWC -> BGR uint8 HWC, on-stream.
-                # --------------------------------------------------------
                 if do_breakdown:
                     t_flip_cast.record_start()
 
@@ -686,6 +710,7 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
                 if do_breakdown:
                     t_gaze.record_start()
 
+                ok = False
                 if gaze is not None:
                     ok = gaze.run(
                         int(in_bgr.data_ptr()),
@@ -714,6 +739,23 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
                 except BrokenPipeError:
                     logger.warning("Sink stdin broken — stopping")
                     break
+
+                if sink_raw is not None:
+                    # Resize raw frame on CPU for comparison stream
+                    import cv2
+
+                    if capture_width != width or capture_height != height:
+                        cv2.resize(frame_bgr, (width, height), dst=passthrough_buf)
+                        pt = passthrough_buf
+                    else:
+                        pt = frame_bgr
+                    if args.mirror:
+                        pt = cv2.flip(pt, 1)
+                    try:
+                        sink_raw.stdin.write(pt.tobytes())
+                    except BrokenPipeError:
+                        logger.warning("Raw sink stdin broken")
+                        sink_raw = None
 
                 if len(fps_window) == 30:
                     avg_dt = sum(fps_window) / len(fps_window)
@@ -758,8 +800,12 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
             pt = frame_bgr
         if args.mirror:
             pt = cv2.flip(pt, 1)
+
+        raw_bytes = pt.tobytes()
         try:
-            sink.stdin.write(pt.tobytes())
+            sink.stdin.write(raw_bytes)
+            if sink_raw is not None:
+                sink_raw.stdin.write(raw_bytes)
         except BrokenPipeError:
             logger.warning("Sink stdin broken — stopping")
             break
@@ -775,15 +821,16 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
     # ------------------------------------------------------------------
     # Shutdown: drain sink, wait for children.
     # ------------------------------------------------------------------
-    logger.info("Main loop exited — draining sink")
-    try:
-        if sink.stdin:
-            sink.stdin.close()
-    except OSError:
-        pass
+    logger.info("Main loop exited — draining sinks")
+    for s in sinks:
+        try:
+            if s.stdin:
+                s.stdin.close()
+        except OSError:
+            pass
 
     deadline = time.monotonic() + 5.0
-    for proc in (sink, capture):
+    for proc in sinks + [capture]:
         remaining = max(0.0, deadline - time.monotonic())
         try:
             proc.wait(timeout=remaining)
