@@ -32,9 +32,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Set up uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v5
         with:
-          version: "0.5.x"
+          version: "latest"
       - name: Install dependencies
         run: uv sync --all-groups
       - name: Run ruff check (pre-commit parity)
