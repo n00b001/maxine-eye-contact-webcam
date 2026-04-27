@@ -28,7 +28,11 @@ Environment="GAZE_HEAD_YAW_LOW=10.0"
 Environment="GAZE_HEAD_YAW_HIGH=35.0"
 
 # --- Head-pose (LivePortrait) tuning -----------------------------------------
+# Set to 0 to disable head-pose correction entirely (gaze-only mode).
 Environment="HEAD_POSE=1"
+# Path to a static portrait image to use instead of the live webcam face.
+# If unset, the live webcam face is used.
+Environment="HEAD_POSE_SOURCE_IMAGE="
 Environment="HEAD_POSE_ENGINE=liveportrait"
 # Overall strength — per-axis _STRENGTH overrides below fall back to this.
 Environment="HEAD_POSE_STRENGTH=1.0"

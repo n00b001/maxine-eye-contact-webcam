@@ -318,6 +318,7 @@ def process_thread(
     raw_q: queue.Queue[np.ndarray],
     out_q: queue.Queue[np.ndarray],
     *,
+    head_pose: bool,
     engine: str,
     strength: float,
     yaw_limit: float,
@@ -327,8 +328,22 @@ def process_thread(
     roll_strength: float,
     pitch_limit: float,
     roll_limit: float,
+    source_image: str | None = None,
 ) -> None:
     """Pull frames from ``raw_q``, apply head-pose correction, push to ``out_q``."""
+    if not head_pose:
+        print("[Pipeline] head-pose correction DISABLED; passing through", flush=True)
+        while not _shutdown.is_set():
+            try:
+                frame = raw_q.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            if out_q.full():
+                with contextlib.suppress(queue.Empty):
+                    out_q.get_nowait()
+            out_q.put(frame)
+        return
+
     mods = _load_hp_modules(engine)
     if mods is None:
         _shutdown.set()
@@ -342,9 +357,11 @@ def process_thread(
         fr_kwargs["pitch_strength"] = pitch_strength
         fr_kwargs["yaw_strength"] = yaw_strength
         fr_kwargs["roll_strength"] = roll_strength
+        fr_kwargs["source_image_path"] = source_image
     frontalizer = fr_cls(**fr_kwargs)
     print(
-        f"[Pipeline] engine={engine}  strength={strength}  compile={compile_models}  "
+        f"[Pipeline] head-pose ENABLED  engine={engine}  strength={strength}  "
+        f"compile={compile_models}  "
         f"pitch(s={pitch_strength}, lim={pitch_limit})  "
         f"yaw(s={yaw_strength}, lim={yaw_limit})  "
         f"roll(s={roll_strength}, lim={roll_limit})",
@@ -440,6 +457,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--input", default=_env_str("INPUT_DEVICE", "/dev/video11"))
     p.add_argument("--output", default=_env_str("OUTPUT_DEVICE", "/dev/video10"))
     p.add_argument(
+        "--head-pose",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("HEAD_POSE", True),
+        help="Enable head-pose correction (env: HEAD_POSE, default: True)",
+    )
+    p.add_argument(
         "--resolution",
         default=_env_str("RESOLUTION", "1080p"),
         choices=list(_PRESETS),
@@ -492,6 +515,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--head-pose-compile",
         action=argparse.BooleanOptionalAction,
         default=_env_bool("HEAD_POSE_COMPILE"),
+    )
+    p.add_argument(
+        "--head-pose-source",
+        default=_env_str("HEAD_POSE_SOURCE_IMAGE", None),
+        help="Path to a static source image for head-pose (env: HEAD_POSE_SOURCE_IMAGE)",
     )
     return p
 
@@ -653,6 +681,7 @@ def main() -> None:  # pragma: no cover
             target=process_thread,
             args=(raw_q, out_q),
             kwargs={
+                "head_pose": args.head_pose,
                 "engine": args.head_pose_engine,
                 "strength": args.head_pose_strength,
                 "yaw_limit": args.head_pose_yaw_limit,
@@ -662,6 +691,7 @@ def main() -> None:  # pragma: no cover
                 "roll_strength": args.head_pose_roll_strength,
                 "pitch_limit": args.head_pose_pitch_limit,
                 "roll_limit": args.head_pose_roll_limit,
+                "source_image": args.head_pose_source,
             },
             daemon=True,
         ),

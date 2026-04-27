@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -60,6 +61,7 @@ class LivePortraitFrontalizer:
         pitch_strength: float | None = None,
         yaw_strength: float | None = None,
         roll_strength: float | None = None,
+        source_image_path: str | None = None,
     ):
         if not _LP_AVAILABLE:
             raise RuntimeError(
@@ -97,18 +99,57 @@ class LivePortraitFrontalizer:
         # original off-axis pixels back into the face.
         self._last_crop_rect: tuple[int, int, int, int] | None = None
 
+        # Static source image support
+        self.source_image_path = source_image_path
+        self._src_data: dict[str, Any] | None = None
+        if self.source_image_path:
+            self._prepare_static_source(self.source_image_path)
+
+    def _prepare_static_source(self, path: str) -> None:
+        """Load and pre-process a static source image."""
+        img = cv2.imread(path)
+        if img is None:
+            print(f"[LivePortrait] WARNING: could not load source image {path}")
+            return
+
+        from head_pose_estimator import HeadPoseEstimator
+
+        hpe = HeadPoseEstimator(static_image_mode=True)
+        try:
+            lms = hpe.get_landmarks(img)
+            if lms is None:
+                print(f"[LivePortrait] WARNING: no face found in source image {path}")
+                return
+
+            rect = self._face_crop_rect(img, lms)
+            if rect is None:
+                return
+
+            rx, ry, rw, rh = rect
+            crop_bgr = img[ry : ry + rh, rx : rx + rw]
+            crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+            crop_256 = cv2.resize(crop_rgb, _INPUT_SHAPE, interpolation=cv2.INTER_LINEAR)
+
+            source = self._wrapper.prepare_source(crop_256)
+            self._src_data = {
+                "feature_3d": self._wrapper.extract_feature_3d(source),
+                "kp_info": self._wrapper.get_kp_info(source, flag_refine_info=True),
+            }
+            print(f"[LivePortrait] Loaded static source image: {path}")
+        finally:
+            hpe.close()
+
     # ------------------------------------------------------------------
     # Cropping helpers
     # ------------------------------------------------------------------
     def _face_crop_rect(
         self, frame: np.ndarray, landmarks: np.ndarray
     ) -> tuple[int, int, int, int] | None:
-        """Compute a padded, square-ish face crop rect for LivePortrait.
+        """Compute the ideal square face crop rect (x_min, y_min, x_max, y_max).
 
-        Larger than the raw landmarks bbox — LivePortrait was trained on
-        portrait crops that include some forehead, cheeks, and chin margin.
+        Can return coordinates outside image boundaries; the caller must
+        handle padding.
         """
-        h, w = frame.shape[:2]
         x0, y0 = landmarks.min(axis=0)
         x1, y1 = landmarks.max(axis=0)
         face_w = float(x1 - x0)
@@ -117,14 +158,41 @@ class LivePortraitFrontalizer:
         cy = (y0 + y1) / 2.0
 
         size = max(face_w, face_h) * (1.0 + 2.0 * _CROP_PAD_RATIO)
-        half = size / 2.0
-        rx = int(max(0, cx - half))
-        ry = int(max(0, cy - half))
-        rw = int(min(w - rx, size))
-        rh = int(min(h - ry, size))
-        if rw < _MIN_CROP_SIZE or rh < _MIN_CROP_SIZE:
+        x_min = int(cx - size / 2.0)
+        y_min = int(cy - size / 2.0)
+        x_max = int(x_min + size)
+        y_max = int(y_min + size)
+
+        if (x_max - x_min) < _MIN_CROP_SIZE:
             return None
-        return rx, ry, rw, rh
+        return x_min, y_min, x_max, y_max
+
+    def _get_robust_crop(
+        self, frame: np.ndarray, rect: tuple[int, int, int, int]
+    ) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+        """Crop and pad frame to exactly match rect, ensuring it's square."""
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = rect
+
+        src_x1 = max(0, x1)
+        src_y1 = max(0, y1)
+        src_x2 = min(w, x2)
+        src_y2 = min(h, y2)
+
+        # Partial crop within bounds
+        crop_part = frame[src_y1:src_y2, src_x1:src_x2]
+
+        # Padding needed to reach target rect
+        pad_t = src_y1 - y1
+        pad_b = y2 - src_y2
+        pad_l = src_x1 - x1
+        pad_r = x2 - src_x2
+
+        crop_full = cv2.copyMakeBorder(
+            crop_part, pad_t, pad_b, pad_l, pad_r, cv2.BORDER_CONSTANT, value=0
+        )
+        # Store the actual intersection for paste-back
+        return crop_full, (src_x1, src_y1, src_x2, src_y2)
 
     # ------------------------------------------------------------------
     # Public API
@@ -149,42 +217,76 @@ class LivePortraitFrontalizer:
         rect = self._face_crop_rect(frame, landmarks)
         if rect is None:
             return None
-        rx, ry, rw, rh = rect
 
-        crop_bgr = frame[ry : ry + rh, rx : rx + rw]
+        crop_bgr, intersect = self._get_robust_crop(frame, rect)
         crop_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
         crop_256 = cv2.resize(crop_rgb, _INPUT_SHAPE, interpolation=cv2.INTER_LINEAR)
 
         # --- LivePortrait forward pass -------------------------------------
-        source = self._wrapper.prepare_source(crop_256)  # 1x3x256x256 cuda
-        feature_3d = self._wrapper.extract_feature_3d(source)
-        x_s_info = self._wrapper.get_kp_info(source, flag_refine_info=True)
+        # If we have a static source, we use its features but drive it with
+        # the motion from the live frame.
+        if self._src_data:
+            feature_3d = self._src_data["feature_3d"]
+            x_s_info = self._src_data["kp_info"]
+        else:
+            source = self._wrapper.prepare_source(crop_256)
+            feature_3d = self._wrapper.extract_feature_3d(source)
+            x_s_info = self._wrapper.get_kp_info(source, flag_refine_info=True)
+
         x_s = self._wrapper.transform_keypoint(x_s_info)
 
-        # Target = per-axis blend of source rotation and 0.
-        # *_strength=1 → that axis fully zeroed (frontal);
-        # *_strength=0 → that axis preserved from source (no correction).
-        # Defaulting roll_strength=0 in the systemd unit keeps the head's
-        # natural tilt — forcing roll=0 looks uncanny in a webcam feed.
-        target_info = dict(x_s_info)
-        target_info["pitch"] = x_s_info["pitch"] * (1.0 - self.pitch_strength)
-        target_info["yaw"] = x_s_info["yaw"] * (1.0 - self.yaw_strength)
-        target_info["roll"] = x_s_info["roll"] * (1.0 - self.roll_strength)
+        # Driving info comes from the live crop
+        live_source = self._wrapper.prepare_source(crop_256)
+        x_d_info = self._wrapper.get_kp_info(live_source, flag_refine_info=True)
+
+        # Target = per-axis blend of LIVE rotation and 0.
+        # We want to correct the LIVE pose towards frontal.
+        target_info = dict(x_d_info)
+        target_info["pitch"] = x_d_info["pitch"] * (1.0 - self.pitch_strength)
+        target_info["yaw"] = x_d_info["yaw"] * (1.0 - self.yaw_strength)
+        target_info["roll"] = x_d_info["roll"] * (1.0 - self.roll_strength)
+
+        # IMPORTANT: Remove 'R' if it exists, so transform_keypoint recomputes
+        # it from the modified euler angles. This is often why correction
+        # "doesn't work" in LivePortrait.
+        target_info.pop("R", None)
+
+        # If we have a static source, we want to keep its scale/translation
+        # to keep the face aligned with the original crop, but take the
+        # expression and corrected pose from the live stream.
+        if self._src_data:
+            target_info["scale"] = x_s_info["scale"]
+            target_info["t"] = x_s_info["t"]
+
         x_d = self._wrapper.transform_keypoint(target_info)
 
         out_dct = self._wrapper.warp_decode(feature_3d, x_s, x_d)
         out_rgb = self._wrapper.parse_output(out_dct["out"])[0]  # 256x256x3 RGB
         out_bgr = cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)
 
-        # Upscale to the original crop size and paste back into a copy of
-        # the full frame. We stash the padded-crop rect so blend_back can
-        # feather at that boundary (not at the caller's tight landmarks
-        # bbox, which would blend original off-axis pixels back *inside*
-        # the face).
-        out_crop = cv2.resize(out_bgr, (rw, rh), interpolation=cv2.INTER_LINEAR)
+        # Upscale to the original (square) crop size.
+        size = rect[2] - rect[0]
+        out_crop_full = cv2.resize(out_bgr, (size, size), interpolation=cv2.INTER_LINEAR)
+
+        # Map back to the original frame intersection.
+        # rect = (x1, y1, x2, y2)
+        # intersect = (src_x1, src_y1, src_x2, src_y2)
+        x1, y1, x2, y2 = rect
+        ix1, iy1, ix2, iy2 = intersect
+
+        # The part of out_crop_full that corresponds to the intersection
+        crop_ix1 = ix1 - x1
+        crop_iy1 = iy1 - y1
+        crop_ix2 = ix2 - x1
+        crop_iy2 = iy2 - y1
+
+        out_crop = out_crop_full[crop_iy1:crop_iy2, crop_ix1:crop_ix2]
+
         warped_full = frame.copy()
-        warped_full[ry : ry + rh, rx : rx + rw] = out_crop
-        self._last_crop_rect = (rx, ry, rw, rh)
+        warped_full[iy1:iy2, ix1:ix2] = out_crop
+
+        # For blend_back, we feather at the intersection boundary.
+        self._last_crop_rect = (ix1, iy1, ix2 - ix1, iy2 - iy1)
         return warped_full
 
     def blend_back(
