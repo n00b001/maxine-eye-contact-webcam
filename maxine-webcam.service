@@ -1,88 +1,121 @@
 [Unit]
-Description=Maxine Eye Contact + Head Pose Correction Webcam
+Description=Maxine Eye Contact + Head Pose Correction (unified GPU pipeline)
 Documentation=https://github.com/n00b001/maxine-eye-contact-webcam
 After=docker.service network-online.target
 Wants=docker.service network-online.target
+Requires=docker.service
 
 [Service]
 Type=simple
 User=__MAXINE_USER__
 WorkingDirectory=/opt/maxine-eye-contact-webcam
-TimeoutStartSec=300
+TimeoutStartSec=900
 
-# --- Eye-contact (AR SDK Docker) tuning --------------------------------------
-# Forwarded into the AR SDK container by maxine_arsdk_headpose.py.
-# See README "Tunable Gaze Parameters" for ranges.
-Environment="GAZE_EYE_SIZE=2"
-Environment="GAZE_LANDMARKS=126"
-Environment="GAZE_NO_REDIRECT=0"
-Environment="GAZE_NO_STABILIZE=0"
-Environment="GAZE_NO_CUDA_GRAPH=0"
-Environment="GAZE_PITCH_LOW=10.0"
-Environment="GAZE_PITCH_HIGH=35.0"
-Environment="GAZE_YAW_LOW=10.0"
-Environment="GAZE_YAW_HIGH=35.0"
-Environment="GAZE_HEAD_PITCH_LOW=10.0"
-Environment="GAZE_HEAD_PITCH_HIGH=35.0"
-Environment="GAZE_HEAD_YAW_LOW=10.0"
+# ============================================================================
+# User-tunable configuration. Every option below is forwarded to the
+# container's environment and read by maxine_fused_pipeline.py (argparse
+# reads each env var as its default). Override any of them by editing this
+# file and `sudo systemctl daemon-reload && sudo systemctl restart
+# maxine-webcam.service`.
+# ============================================================================
+
+# ---------------- Pipeline stage toggles ----------------
+# Set to 0 to disable. Both on by default.
+Environment="FLP_ENABLED=1"
+Environment="GAZE_ENABLED=1"
+# 1 = paste animated face back into live webcam stream (overlay).
+# 0 = overwrite video with source portrait (overwrite).
+Environment="OVERLAY_ENABLED=1"
+
+# ---------------- Video orientation ----------------
+# 1 = horizontally flip the output (selfie orientation). 0 = webcam-native LR.
+Environment="MIRROR=1"
+
+# ---------------- Devices ----------------
+Environment="INPUT_DEVICE=/dev/video0"
+Environment="OUTPUT_DEVICE=/dev/video10"
+# Optional device for the original unchanged video (for comparison).
+# Set to a /dev/videoX path to enable.
+Environment="OUTPUT_DEVICE_RAW="
+
+# ---------------- Resolution + framerate ----------------
+# OUTPUT_WIDTH/HEIGHT = size of frames written to /dev/video10 (what
+# consumer apps like Zoom see).
+Environment="OUTPUT_WIDTH=1920"
+Environment="OUTPUT_HEIGHT=1080"
+# CAPTURE_WIDTH/HEIGHT = size requested from the webcam. FLP downscales
+# internally so higher capture res is wasted bandwidth + latency.
+Environment="CAPTURE_WIDTH=640"
+Environment="CAPTURE_HEIGHT=480"
+Environment="FPS=30"
+
+# ---------------- Source portrait ----------------
+# Neutral frontal portrait of the user. MUST exist at this path (mounted
+# read-only into the container by docker-compose.yml).
+Environment="SRC_IMAGE=/app/src-portrait.jpg"
+
+# ---------------- FLP stability + per-axis strength ----------------
+# EMA smoothing alpha for FLP's motion_extractor output.
+#   1.0  = off (raw FLP, maximum responsiveness, most shimmer)
+#   0.5  = balanced
+#   0.3  = default; ~65 ms half-response at 30 fps
+#   0.1  = very smooth but noticeably laggy
+Environment="FLP_MOTION_EMA=0.3"
+# Per-axis frontalization strength. For each axis:
+#   0.0 = no correction on that axis (let driving pose pass through)
+#   1.0 = full frontalize (lock that axis to the source portrait's pose)
+# 0.5 means "halfway between your real pose and the frontal pose".
+Environment="FLP_PITCH_STRENGTH=1.0"
+Environment="FLP_YAW_STRENGTH=1.0"
+Environment="FLP_ROLL_STRENGTH=1.0"
+
+# ---------------- AR SDK gaze thresholds (degrees) ----------------
+# The AR SDK softly starts redirecting gaze at the LOW threshold and
+# reaches full strength at the HIGH threshold. Outside HIGH the SDK
+# stops redirecting (the look is considered "intentional").
+Environment="GAZE_PITCH_LOW=20.0"
+Environment="GAZE_PITCH_HIGH=30.0"
+Environment="GAZE_YAW_LOW=20.0"
+Environment="GAZE_YAW_HIGH=30.0"
+Environment="GAZE_HEAD_PITCH_LOW=15.0"
+Environment="GAZE_HEAD_PITCH_HIGH=25.0"
+Environment="GAZE_HEAD_YAW_LOW=25.0"
 Environment="GAZE_HEAD_YAW_HIGH=35.0"
 
-# --- Head-pose (LivePortrait) tuning -----------------------------------------
-Environment="HEAD_POSE=1"
-Environment="HEAD_POSE_ENGINE=liveportrait"
-# Overall strength — per-axis _STRENGTH overrides below fall back to this.
-Environment="HEAD_POSE_STRENGTH=1.0"
-# Per-axis strength (1.0 = zero that axis = fully correct; 0.0 = preserve
-# source rotation on that axis = disable correction for that axis). Roll
-# defaults to 0.0 because forcing roll=0 looks uncanny on a webcam feed —
-# natural micro-tilt reads as "alive". Flip to 1.0 to level the head.
-Environment="HEAD_POSE_PITCH_STRENGTH=1.0"
-Environment="HEAD_POSE_YAW_STRENGTH=1.0"
-Environment="HEAD_POSE_ROLL_STRENGTH=0.0"
-# Per-axis skip limit (degrees). If |angle| exceeds the limit on ANY axis
-# the frame passes through uncorrected — LP produces uncanny warps at
-# extreme rotations. Raise a limit if you want correction at more extreme
-# angles (at the cost of occasional glitches).
-Environment="HEAD_POSE_PITCH_LIMIT=45.0"
-Environment="HEAD_POSE_YAW_LIMIT=45.0"
-Environment="HEAD_POSE_ROLL_LIMIT=45.0"
-Environment="HEAD_POSE_COMPILE=1"
+# ---------------- AR SDK other knobs ----------------
+# Landmark model size: 68 (faster, less precise) or 126 (default).
+Environment="GAZE_LANDMARKS=126"
+# 0..7 — higher smooths eye-size changes more aggressively.
+Environment="GAZE_EYE_SIZE=3"
+# CUDA graph capture: 1 = on (lower latency), 0 = off.
+Environment="GAZE_CUDA_GRAPH=1"
+# Temporal filtering: 1 = on (smoother gaze vector), 0 = off.
+Environment="GAZE_STABILIZE=1"
 
-# --- Pipeline ----------------------------------------------------------------
-# Stage ordering: HEAD POSE FIRST, then EYE CONTACT.
-#   /dev/video0 → Python LivePortrait head-pose → /dev/video11 → AR SDK
-#   gaze redirection → /dev/video10 → Zoom/Teams/Chrome.
-# Running gaze first would aim the eyes at the camera, and the subsequent
-# head-pose rotation would then send them off-axis again.
-Environment="INPUT_DEVICE=/dev/video0"
-Environment="OUTPUT_DEVICE=/dev/video11"
-Environment="FINAL_OUTPUT=/dev/video10"
-# Camera MJPEG sustains 30 fps at 1080p over USB 2.0; raw YUYV caps at 2 fps.
-Environment="INPUT_FORMAT=mjpeg"
-# YUYV422 is what the AR SDK binary expects from its camera input.
-Environment="OUTPUT_FORMAT=yuyv422"
-Environment="RESOLUTION=1080p"
-Environment="FPS=30"
-Environment="START_ARSDK=1"
-Environment="ARSDK_CONTAINER_NAME=maxine-arsdk"
-Environment="ARSDK_IMAGE=ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest"
+# ---------------- Paths (rarely changed) ----------------
+Environment="MODEL_DIR=/usr/local/ARSDK/lib/models"
+Environment="FLP_CFG=/app/vendor/FasterLivePortrait/configs/trt_infer.yaml"
+
+# ---------------- Logging ----------------
+Environment="LOG_LEVEL=INFO"
 Environment="PYTHONUNBUFFERED=1"
 
-# Prep: cached pull (no-op if up to date) + clean stale container + disable
-# Logitech-style low-light frame-rate drop so the camera stays at 30 fps.
-ExecStartPre=-/usr/bin/docker pull ghcr.io/n00b001/maxine-eye-contact-webcam/arsdk-gaze:latest
-ExecStartPre=-/usr/bin/docker rm -f maxine-arsdk
+# ============================================================================
+# Lifecycle hooks (internal — don't change unless you know what you're doing).
+# ============================================================================
+
+# Clean any stale container + disable the UVC low-light framerate drop on
+# /dev/video0 (without this many webcams silently drop to 2 fps in dim rooms).
+ExecStartPre=-/usr/bin/docker compose -f /opt/maxine-eye-contact-webcam/docker-compose.yml down --remove-orphans
 ExecStartPre=-/usr/bin/v4l2-ctl -d /dev/video0 --set-ctrl=exposure_dynamic_framerate=0
+ExecStartPre=-/usr/bin/v4l2-ctl -d /dev/video0 --set-parm=30
 
-# One Python process owns everything: it spawns the AR SDK Docker container
-# as a child, pipes its stdout/stderr into this journal, reads the corrected
-# frames from /dev/video11, runs LivePortrait head-pose, and writes the final
-# stream to /dev/video10.
-ExecStart=/usr/bin/env bash -c 'export PATH="$HOME/.local/bin:$PATH" && cd /opt/maxine-eye-contact-webcam && exec uv run python maxine_arsdk_headpose.py'
+# Start the container. --abort-on-container-exit makes Restart=on-failure work.
+# --no-log-prefix keeps the journal output clean (one line per Python log line).
+ExecStart=/usr/bin/docker compose -f /opt/maxine-eye-contact-webcam/docker-compose.yml up --abort-on-container-exit --no-log-prefix
 
-# Defence in depth: if the Python process ever dies without cleaning up, kill
-# the AR SDK container here too so the next start doesn't hit a name clash.
-ExecStopPost=-/usr/bin/docker rm -f maxine-arsdk
+# Graceful stop — give the orchestrator 10 s to drain its sink ffmpeg.
+ExecStop=/usr/bin/docker compose -f /opt/maxine-eye-contact-webcam/docker-compose.yml down --timeout 10
 
 Restart=on-failure
 RestartSec=5
