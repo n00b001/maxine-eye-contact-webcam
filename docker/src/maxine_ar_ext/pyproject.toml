@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61", "wheel", "pybind11>=2.12"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maxine_ar_ext"
+version = "0.1.0"
+description = "Zero-copy pybind11 shim over NVIDIA Maxine AR SDK GazeRedirection"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[tool.setuptools]
+py-modules = []
