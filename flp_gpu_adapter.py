@@ -91,6 +91,7 @@ def _intercepting_paste_back(img_crop, M_c2o, img_ori, mask_ori):  # noqa: N803
         bg = torch.from_numpy(bg).to(device=img_crop.device, non_blocking=True).float()
 
     result = _original_paste_back(img_crop, M_c2o, bg, mask_ori)
+    result = _original_paste_back(img_crop, M_c2o, img_ori, mask_ori)
     _last_paste_back[0] = result
     return result
 
@@ -152,6 +153,8 @@ def headpose_predict_to_rotation_matrix(headpose: torch.Tensor) -> torch.Tensor:
 
 def _install_motion_smoothing(pipe, alpha: float) -> None:
     """Monkey-patch motion_extractor.predict to EMA-smooth head pose only."""
+def _install_motion_smoothing(pipe, alpha: float) -> None:
+    """Monkey-patch motion_extractor.predict to EMA-smooth its outputs."""
     if alpha >= 1.0:
         return
     ex = pipe.model_dict.get("motion_extractor") if hasattr(pipe, "model_dict") else None
@@ -196,6 +199,15 @@ def _install_motion_smoothing(pipe, alpha: float) -> None:
 
         _motion_prev[0] = new_motion
         return new_motion
+        a = alpha
+        try:
+            blended = tuple(a * c + (1.0 - a) * p for c, p in zip(current, prev, strict=False))
+        except (TypeError, ValueError):
+            # If any element isn't array-like, fall back to the raw output.
+            _motion_prev[0] = current
+            return current
+        _motion_prev[0] = blended
+        return blended
 
     ex.predict = smoothed
     ex._smoothed = True
@@ -226,6 +238,33 @@ def _capture_source_pose(pipe) -> None:
         logger.warning("Could not capture source pose for axis-strength blend: %s", exc)
 
 
+def headpose_predict_to_rotation_matrix(headpose: torch.Tensor) -> torch.Tensor:
+    """
+    Convert FLP headpose (pitch, yaw, roll) tensor to rotation matrix R.
+    Expects headpose in shape (B, 3) or (3,).
+    """
+    if headpose.ndim == 1:
+        headpose = headpose.unsqueeze(0)
+    res = torch.zeros((headpose.shape[0], 3, 3), device=headpose.device, dtype=headpose.dtype)
+
+    sin = torch.sin(headpose)
+    cos = torch.cos(headpose)
+
+    # ZYX rotation (standard for FLP)
+    # R = R_z * R_y * R_x
+    res[:, 0, 0] = cos[:, 1] * cos[:, 2]
+    res[:, 0, 1] = sin[:, 0] * sin[:, 1] * cos[:, 2] - cos[:, 0] * sin[:, 2]
+    res[:, 0, 2] = cos[:, 0] * sin[:, 1] * cos[:, 2] + sin[:, 0] * sin[:, 2]
+    res[:, 1, 0] = cos[:, 1] * sin[:, 2]
+    res[:, 1, 1] = sin[:, 0] * sin[:, 1] * sin[:, 2] + cos[:, 0] * cos[:, 2]
+    res[:, 1, 2] = cos[:, 0] * sin[:, 1] * sin[:, 2] - sin[:, 0] * cos[:, 2]
+    res[:, 2, 0] = -sin[:, 1]
+    res[:, 2, 1] = sin[:, 0] * cos[:, 1]
+    res[:, 2, 2] = cos[:, 0] * cos[:, 1]
+
+    return res
+
+
 def _install_axis_strength(pipe, strengths: tuple) -> None:
     """Blend each axis of motion_extractor output toward the source pose."""
     sp, sy, sr = strengths
@@ -243,6 +282,7 @@ def _install_axis_strength(pipe, strengths: tuple) -> None:
             return result
         src_p, src_y, src_r = src
         p, y, r = result[0], result[1], result[2]
+        t, exp_, scale, kp = result[3], result[4], result[5], result[6]
         try:
             p_out = (1.0 - sp) * p + sp * src_p
             y_out = (1.0 - sy) * y + sy * src_y
@@ -259,6 +299,22 @@ def _install_axis_strength(pipe, strengths: tuple) -> None:
             return tuple(res_list)
         except (TypeError, ValueError):
             return result
+        except (TypeError, ValueError):
+            return result
+
+        # Force re-computation of the rotation matrix R from the corrected euler
+        # angles if R was in the original result.
+        # FLP's result tuple typically has R at index 7 if present.
+        if len(result) > 7:
+            # We recompute R and update the tuple to keep it consistent.
+            new_headpose = torch.stack([p_out, y_out, r_out], dim=-1)
+            new_r = headpose_predict_to_rotation_matrix(new_headpose)
+            res_list = list(result)
+            res_list[0], res_list[1], res_list[2] = p_out, y_out, r_out
+            res_list[7] = new_r
+            return tuple(res_list)
+
+        return (p_out, y_out, r_out, t, exp_, scale, kp)
 
     ex.predict = blend
     ex._axis_blended = True
@@ -271,6 +327,17 @@ def _install_axis_strength(pipe, strengths: tuple) -> None:
 
 class FLPFrontalizer:
     """One-time-init wrapper around FasterLivePortraitPipeline."""
+    """One-time-init wrapper around FasterLivePortraitPipeline.
+
+    Usage
+    -----
+        frontalizer = FLPFrontalizer(src_image_path="neutral.jpg")
+        while capturing:
+            t = frontalizer.frontalize(frame_bgr)
+            if t is not None:
+                # t is (H, W, 3) float32 RGB [0, 255] on CUDA
+                consume_on_gpu(t)
+    """
 
     def __init__(
         self,
@@ -298,6 +365,9 @@ class FLPFrontalizer:
             self._load_source(src_image_path)
 
         # Install motion smoothing AFTER _load_source.
+        # Install motion smoothing AFTER _load_source so the source-image
+        # motion extraction isn't blended with driving-frame extractions.
+        # Reset the EMA state so the first driving frame starts clean.
         _reset_motion_smoothing()
         alpha = (
             motion_ema_alpha
@@ -307,6 +377,8 @@ class FLPFrontalizer:
         _install_motion_smoothing(self._pipe, alpha=alpha)
 
         # Capture source pose + install per-axis strength blend.
+        # Capture source pose + install per-axis strength blend. Order
+        # matters: smoothing first (inner), axis-strength on top (outer).
         _capture_source_pose(self._pipe)
         strengths = axis_strength if axis_strength is not None else (1.0, 1.0, 1.0)
         _install_axis_strength(self._pipe, strengths)
@@ -342,6 +414,12 @@ class FLPFrontalizer:
         torch.Tensor | None
             Full-frame paste-back as a (H, W, 3) float32 CUDA tensor, RGB,
             values in [0, 255]. Returns None if no face was detected.
+
+        Notes
+        -----
+        The returned tensor lives on the current CUDA stream. It must be
+        consumed (or cloned) before the next frontalize() call, otherwise
+        the buffer may be overwritten by the next paste-back.
         """
         if self._src_info is None:
             raise RuntimeError(
@@ -361,11 +439,32 @@ class FLPFrontalizer:
             self._src_info,
         )
         i_p_pstbk_numpy = result[2]
+        # Clear the interception slot so a stale tensor from a previous frame
+        # can't leak through on a no-face frame.
+        _last_paste_back[0] = None
+
+        # When overlay=True, we use the live webcam frame as the background.
+        # FLP's run() uses the second argument as the background for paste-back.
+        background = frame_bgr if overlay else self._img_src
+
+        # Don't pass realtime= as kwarg — FLP's run() threads it positionally
+        # into _run() internally, so a kwarg here causes a duplicate-argument
+        # TypeError. FLP defaults work correctly for our continuous capture.
+        result = self._pipe.run(
+            frame_bgr,
+            background,
+            self._src_info,
+        )
+        _img_crop, _out_crop, i_p_pstbk_numpy, _motion = result
 
         if i_p_pstbk_numpy is None or _last_paste_back[0] is None:
             self._no_face_streak += 1
             if self._no_face_streak % self._no_face_log_interval == 1:
                 logger.warning("FLP: no face for %d consecutive frames", self._no_face_streak)
+                logger.warning(
+                    "FLP: no face for %d consecutive frames",
+                    self._no_face_streak,
+                )
             return None
 
         self._no_face_streak = 0
@@ -373,11 +472,21 @@ class FLPFrontalizer:
 
     @property
     def last_output_pixel_format(self) -> str:
+        """Colour space of the tensor returned by frontalize(): always 'rgb'."""
         return "rgb"
 
     @property
     def pipe(self) -> FasterLivePortraitPipeline:
         return self._pipe
+
+
+        """Expose the underlying pipeline for advanced access."""
+        return self._pipe
+
+
+# ---------------------------------------------------------------------------
+# Debug helper
+# ---------------------------------------------------------------------------
 
 
 def pull_to_numpy(tensor: torch.Tensor) -> np.ndarray:
