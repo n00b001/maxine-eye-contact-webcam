@@ -406,8 +406,6 @@ def _open_sink(
 
 def _install_signal_handlers(capture: subprocess.Popen, sinks: list[subprocess.Popen]) -> None:
     """Install SIGTERM/SIGINT handlers that drain the sinks and propagate."""
-def _install_signal_handlers(capture: subprocess.Popen, sink: subprocess.Popen) -> None:
-    """Install SIGTERM/SIGINT handlers that drain the sink and propagate."""
 
     def _handler(signum: int, _frame) -> None:
         logger.info("Signal %d received — shutting down", signum)
@@ -421,14 +419,6 @@ def _install_signal_handlers(capture: subprocess.Popen, sink: subprocess.Popen) 
         # Give children up to 5 s to exit.
         deadline = time.monotonic() + 5.0
         for proc in sinks + [capture]:
-        try:
-            if sink.stdin:
-                sink.stdin.close()
-        except OSError:
-            pass
-        # Give both children up to 5 s to exit.
-        deadline = time.monotonic() + 5.0
-        for proc in (sink, capture):
             remaining = max(0.0, deadline - time.monotonic())
             try:
                 proc.wait(timeout=remaining)
@@ -460,9 +450,6 @@ class _StageTimer:
         self._start.record()
         self._recorded = True
 
-    def record_start(self) -> None:
-        self._start.record()
-
     def record_end(self) -> None:
         self._end.record()
 
@@ -474,8 +461,6 @@ class _StageTimer:
         ms = self._start.elapsed_time(self._end)
         self._recorded = False
         return ms
-        self._end.synchronize()
-        return self._start.elapsed_time(self._end)
 
 
 # ---------------------------------------------------------------------------
@@ -599,8 +584,6 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
 
     _install_signal_handlers(capture, sinks)
 
-    _install_signal_handlers(capture, sink)
-
     # ------------------------------------------------------------------
     # Per-frame read buffer (reused, no allocation in the hot loop).
     # Sized for the CAPTURE dimensions, which may be smaller than the
@@ -712,9 +695,6 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
                     flt = flt_nchw.squeeze(0).permute(1, 2, 0)
 
                 # Step 3: RGB float32 HWC -> BGR uint8 HWC, on-stream.
-                # --------------------------------------------------------
-                # Step 3: RGB float32 HWC -> BGR uint8 HWC, on-stream.
-                # --------------------------------------------------------
                 if do_breakdown:
                     t_flip_cast.record_start()
 
@@ -784,7 +764,6 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
 
                 if do_breakdown:
                     ms_front = t_frontalize.elapsed_ms()
-                    ms_flip = t_flip_cast.elapsed_ms()
                     ms_flip = t_flip_cast.elapsed_ms() if flt is not None else 0.0
                     ms_gz = t_gaze.elapsed_ms()
                     try:
@@ -809,8 +788,6 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
                 frame_idx += 1
                 continue
 
-        # Passthrough path: no face detected AND Gaze failed/disabled
-        import cv2
         # Passthrough path: no face detected AND Gaze failed/disabled,
         # OR both FLP and Gaze explicitly disabled. No GPU round-trip
         # needed for this frame.
@@ -829,8 +806,6 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
             sink.stdin.write(raw_bytes)
             if sink_raw is not None:
                 sink_raw.stdin.write(raw_bytes)
-        try:
-            sink.stdin.write(pt.tobytes())
         except BrokenPipeError:
             logger.warning("Sink stdin broken — stopping")
             break
@@ -856,15 +831,6 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
 
     deadline = time.monotonic() + 5.0
     for proc in sinks + [capture]:
-    logger.info("Main loop exited — draining sink")
-    try:
-        if sink.stdin:
-            sink.stdin.close()
-    except OSError:
-        pass
-
-    deadline = time.monotonic() + 5.0
-    for proc in (sink, capture):
         remaining = max(0.0, deadline - time.monotonic())
         try:
             proc.wait(timeout=remaining)
