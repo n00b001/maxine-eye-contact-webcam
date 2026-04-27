@@ -206,7 +206,6 @@ def _install_axis_strength(pipe, strengths: tuple) -> None:
     inner = ex.predict  # already wrapped by smoothing if that was installed
 
     def blend(*data, **kwargs):
-        result = list(inner(*data, **kwargs))
         result = inner(*data, **kwargs)
         src = _source_pose[0]
         if src is None or len(result) < 7:
@@ -219,19 +218,20 @@ def _install_axis_strength(pipe, strengths: tuple) -> None:
             y_out = (1.0 - sy) * y + sy * src_y
             r_out = (1.0 - sr) * r + sr * src_r
         except (TypeError, ValueError):
-            return tuple(result)
+            return result
 
         # Force re-computation of the rotation matrix R from the corrected euler
         # angles if R was in the original result.
         # FLP's result tuple typically has R at index 7 if present.
         if len(result) > 7:
             # We recompute R and update the tuple to keep it consistent.
-            # result[0:3] are (pitch, yaw, roll)
             new_headpose = torch.stack([p_out, y_out, r_out], dim=-1)
             new_r = headpose_predict_to_rotation_matrix(new_headpose)
-            return (p_out, y_out, r_out, t, exp_, scale, kp, new_r, *result[8:])
+            res_list = list(result)
+            res_list[0], res_list[1], res_list[2] = p_out, y_out, r_out
+            res_list[7] = new_r
+            return tuple(res_list)
 
-            return result
         return (p_out, y_out, r_out, t, exp_, scale, kp)
 
     ex.predict = blend
@@ -311,7 +311,6 @@ class FLPFrontalizer:
         _reset_motion_smoothing()
 
     def frontalize(self, frame_bgr: np.ndarray, overlay: bool = True) -> torch.Tensor | None:
-    def frontalize(self, frame_bgr: np.ndarray) -> torch.Tensor | None:
         """Drive FLP with the current webcam frame.
 
         Parameters
@@ -353,7 +352,6 @@ class FLPFrontalizer:
         result = self._pipe.run(
             frame_bgr,
             background,
-            self._img_src,
             self._src_info,
         )
         _img_crop, _out_crop, i_p_pstbk_numpy, _motion = result
