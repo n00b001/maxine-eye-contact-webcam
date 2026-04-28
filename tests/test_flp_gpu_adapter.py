@@ -183,6 +183,23 @@ def test_headpose_predict_to_rotation_matrix():
     assert r2_mat.shape == (2, 3, 3)
 
 
+def test_capture_source_pose_captures_m_c2o():
+    mock_pipe = mock.MagicMock()
+    mock_pipe.src_infos = [
+        [
+            {
+                "pitch": np.array([0.1]),
+                "yaw": np.array([0.2]),
+                "roll": np.array([0.3]),
+                "M_c2o": np.eye(3)[:2],
+            }
+        ]
+    ]
+    flp_gpu_adapter._capture_source_pose(mock_pipe)
+    assert flp_gpu_adapter._source_m_c2o[0] is not None
+    assert np.array_equal(flp_gpu_adapter._source_m_c2o[0], np.eye(3)[:2])
+
+
 def test_install_axis_strength():
     mock_pipe = mock.MagicMock()
     mock_ex = mock.MagicMock()
@@ -235,18 +252,28 @@ def test_intercepting_paste_back():
     with mock.patch("flp_gpu_adapter._original_paste_back") as mock_orig:
         mock_orig.return_value = "success"
 
-        flp_gpu_adapter._target_background[0] = None
+        # Case 1: Overlay mode, no driving M_c2o. Should use M_c2o from arguments.
+        flp_gpu_adapter._is_overlay[0] = True
         flp_gpu_adapter._driving_m_c2o[0] = None
+        flp_gpu_adapter._target_background[0] = None
         res = flp_gpu_adapter._intercepting_paste_back(img_crop, m_c2o, img_ori, mask_ori)
         assert res == "success"
         mock_orig.assert_called_with(img_crop, m_c2o, img_ori, mask_ori)
 
+        # Case 2: Overlay mode with driving M_c2o. Should override.
         driving_m = np.eye(3)[:2].reshape(1, 2, 3) * 2.0
         flp_gpu_adapter._driving_m_c2o[0] = driving_m
-        flp_gpu_adapter._target_background[0] = img_ori
         flp_gpu_adapter._intercepting_paste_back(img_crop, m_c2o, img_ori, mask_ori)
         args, _kwargs = mock_orig.call_args
         assert torch.allclose(args[1], torch.from_numpy(driving_m))
+
+        # Case 3: Overwrite mode. Should use source M_c2o if available.
+        source_m = np.eye(3)[:2].reshape(1, 2, 3) * 3.0
+        flp_gpu_adapter._is_overlay[0] = False
+        flp_gpu_adapter._source_m_c2o[0] = source_m
+        flp_gpu_adapter._intercepting_paste_back(img_crop, m_c2o, img_ori, mask_ori)
+        args, _kwargs = mock_orig.call_args
+        assert torch.allclose(args[1], torch.from_numpy(source_m))
 
 
 def test_frontalizer_frontalize_path():
@@ -279,6 +306,17 @@ def test_frontalizer_frontalize_path():
         mock_pipe.run.side_effect = mock_run
 
         dummy_frame = np.zeros((100, 100, 3), dtype=np.uint8)
+
+        # Test overlay=True
         res = frontalizer.frontalize(dummy_frame, overlay=True)
         assert res is not None
-        assert res.item() == 1.0
+        assert flp_gpu_adapter._is_overlay[0] is True
+        # Background should be based on dummy_frame (converted to RGB)
+        assert flp_gpu_adapter._target_background[0].shape == (100, 100, 3)
+
+        # Test overlay=False
+        res = frontalizer.frontalize(dummy_frame, overlay=False)
+        assert res is not None
+        assert flp_gpu_adapter._is_overlay[0] is False
+        # Background should be the source image
+        assert flp_gpu_adapter._target_background[0] is frontalizer._img_src

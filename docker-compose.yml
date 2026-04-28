@@ -16,6 +16,7 @@ services:
       # Pipeline toggles
       - FLP_ENABLED
       - GAZE_ENABLED
+      - OVERLAY_ENABLED
       # Orientation
       - MIRROR
       # Devices
@@ -31,6 +32,8 @@ services:
       # Source portrait
       - SRC_IMAGE
       # FLP stability + axis strength
+      - FLP_POSE_EMA
+      - FLP_EXP_EMA
       - FLP_MOTION_EMA
       - FLP_PITCH_STRENGTH
       - FLP_YAW_STRENGTH

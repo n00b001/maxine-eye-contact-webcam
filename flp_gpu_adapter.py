@@ -73,6 +73,7 @@ logger = logging.getLogger(__name__)
 _last_paste_back: list[torch.Tensor | None] = [None]
 _target_background: list[torch.Tensor | np.ndarray | None] = [None]
 _driving_m_c2o: list[np.ndarray | None] = [None]  # Stash M_c2o from cropper
+_is_overlay: list[bool] = [True]  # Track whether we are in overlay or overwrite mode
 _original_paste_back = _flp_pipe_mod.paste_back_pytorch
 
 
@@ -93,9 +94,14 @@ def _intercepting_paste_back(img_crop, M_c2o, img_ori, mask_ori):  # noqa: N803
 
     # When overlaying, use the M_c2o matrix captured from the driving frame
     # so the face follows the user's current position/scale.
+    # When NOT overlaying (overwrite mode), use the M_c2o from the source
+    # portrait so the face stays in its original neutral position.
     m_use = M_c2o
-    if _driving_m_c2o[0] is not None and _target_background[0] is not None:
-        m_use = torch.from_numpy(_driving_m_c2o[0]).to(img_crop.device, non_blocking=True)
+    if _is_overlay[0]:
+        if _driving_m_c2o[0] is not None:
+            m_use = torch.from_numpy(_driving_m_c2o[0]).to(img_crop.device, non_blocking=True)
+    elif _source_m_c2o[0] is not None:
+        m_use = torch.from_numpy(_source_m_c2o[0]).to(img_crop.device, non_blocking=True)
 
     result = _original_paste_back(img_crop, m_use, bg, mask_ori)
     _last_paste_back[0] = result
@@ -229,13 +235,15 @@ def _install_motion_smoothing(pipe, pose_alpha: float, exp_alpha: float) -> None
 # ---------------------------------------------------------------------------
 
 _source_pose: list = [None]  # tuple(source_pitch, source_yaw, source_roll)
+_source_m_c2o: list[np.ndarray | None] = [None]
 
 
 def _capture_source_pose(pipe) -> None:
-    """Read the source-image pose out of FLP's src_infos cache."""
+    """Read the source-image pose and M_c2o out of FLP's src_infos cache."""
     try:
         info = pipe.src_infos[0][0]  # first face of the single source frame
         _source_pose[0] = (info["pitch"].copy(), info["yaw"].copy(), info["roll"].copy())
+        _source_m_c2o[0] = info["M_c2o"].copy()
     except (AttributeError, IndexError, KeyError, TypeError) as exc:
         logger.warning("Could not capture source pose for axis-strength blend: %s", exc)
 
@@ -417,23 +425,20 @@ class FLPFrontalizer:
 
         _last_paste_back[0] = None
         _driving_m_c2o[0] = None
+        _is_overlay[0] = overlay
 
         # When overlay=True, we use the live webcam frame as the background.
         # FLP's run() uses the second argument as the background for paste-back.
         if overlay:
             import cv2
 
-            # Resize the driving frame to match the source portrait's dimensions
-            # so it can be used as a background for paste-back.
-            h, w = self._img_src.shape[:2]
-            if frame_bgr.shape[0] != h or frame_bgr.shape[1] != w:
-                bg_bgr = cv2.resize(frame_bgr, (w, h))
-            else:
-                bg_bgr = frame_bgr
-            background = cv2.cvtColor(bg_bgr, cv2.COLOR_BGR2RGB).astype(np.float32)
+            # Use the driving frame as-is for the background. FasterLivePortrait's
+            # paste_back_pytorch works by warping the cropped face back onto the
+            # provided background using M_c2o. By using the original driving
+            # frame and its M_c2o, the face is correctly aligned.
+            background = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB).astype(np.float32)
         else:
             background = self._img_src
-            _driving_m_c2o[0] = None  # Use source M_c2o when not overlaying
 
         # Stash the background so our intercepting paste_back can find it.
         # FLP's internal .run() often ignores its second argument and uses

@@ -25,6 +25,7 @@ dev = [
     # huggingface_hub is used by setup.sh to download FLP ONNX weights
     # into /opt/flp-checkpoints on the host.
     "huggingface_hub>=0.24",
+    "pytest-cov>=7.1.0",
 ]
 
 [tool.ruff]
