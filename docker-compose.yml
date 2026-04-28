@@ -21,6 +21,7 @@ services:
       # Devices
       - INPUT_DEVICE
       - OUTPUT_DEVICE
+      - OUTPUT_DEVICE_RAW
       # Resolution + framerate
       - OUTPUT_WIDTH
       - OUTPUT_HEIGHT
@@ -57,6 +58,7 @@ services:
     devices:
       - /dev/video0:/dev/video0
       - /dev/video10:/dev/video10
+      - /dev/video11:/dev/video11
     volumes:
       # FLP ONNX models + TRT engines (downloaded once on host, built on first run).
       - /opt/flp-checkpoints:/opt/flp-checkpoints

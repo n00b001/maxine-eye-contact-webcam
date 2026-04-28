@@ -72,6 +72,7 @@ logger = logging.getLogger(__name__)
 
 _last_paste_back: list[torch.Tensor | None] = [None]
 _target_background: list[torch.Tensor | np.ndarray | None] = [None]
+_driving_M_c2o: list[np.ndarray | None] = [None]  # Stash M_c2o from cropper
 _original_paste_back = _flp_pipe_mod.paste_back_pytorch
 
 
@@ -90,7 +91,13 @@ def _intercepting_paste_back(img_crop, M_c2o, img_ori, mask_ori):  # noqa: N803
     if isinstance(bg, np.ndarray):
         bg = torch.from_numpy(bg).to(device=img_crop.device, non_blocking=True).float()
 
-    result = _original_paste_back(img_crop, M_c2o, bg, mask_ori)
+    # When overlaying, use the M_c2o matrix captured from the driving frame
+    # so the face follows the user's current position/scale.
+    m_use = M_c2o
+    if _driving_M_c2o[0] is not None and _target_background[0] is not None:
+        m_use = torch.from_numpy(_driving_M_c2o[0]).to(img_crop.device, non_blocking=True)
+
+    result = _original_paste_back(img_crop, m_use, bg, mask_ori)
     _last_paste_back[0] = result
     return result
 
@@ -150,9 +157,13 @@ def headpose_predict_to_rotation_matrix(headpose: torch.Tensor) -> torch.Tensor:
     return res
 
 
-def _install_motion_smoothing(pipe, alpha: float) -> None:
-    """Monkey-patch motion_extractor.predict to EMA-smooth its outputs."""
-    if alpha >= 1.0:
+def _install_motion_smoothing(pipe, pose_alpha: float, exp_alpha: float) -> None:
+    """Monkey-patch motion_extractor.predict to EMA-smooth its outputs.
+
+    pose_alpha: EMA for head pose (pitch/yaw/roll/t/scale). Lower = smoother.
+    exp_alpha: EMA for expressions (mouth/eyes). 1.0 = raw/no smoothing.
+    """
+    if pose_alpha >= 1.0 and exp_alpha >= 1.0:
         return
     ex = pipe.model_dict.get("motion_extractor") if hasattr(pipe, "model_dict") else None
     if ex is None:
@@ -171,19 +182,22 @@ def _install_motion_smoothing(pipe, alpha: float) -> None:
 
         # current tuple: (pitch, yaw, roll, t, exp, scale, kp, R)
         # indices: 0:pitch, 1:yaw, 2:roll, 3:t, 4:exp, 5:scale, 6:kp, 7:R
-
-        # We ONLY smooth head pose and scale (stable parameters)
-        # 4 (expression) and 6 (keypoints) are passed through raw.
-        a = alpha
+        ap = pose_alpha
+        ae = exp_alpha
         try:
             res_list = list(current)
             # Smooth pitch, yaw, roll
             for i in [0, 1, 2]:
-                res_list[i] = a * current[i] + (1.0 - a) * prev[i]
+                res_list[i] = ap * current[i] + (1.0 - ap) * prev[i]
             # Smooth translation
-            res_list[3] = a * current[3] + (1.0 - a) * prev[3]
+            res_list[3] = ap * current[3] + (1.0 - ap) * prev[3]
+            # Smooth expression
+            res_list[4] = ae * current[4] + (1.0 - ae) * prev[4]
             # Smooth scale
-            res_list[5] = a * current[5] + (1.0 - a) * prev[5]
+            res_list[5] = ap * current[5] + (1.0 - ap) * prev[5]
+            # Keypoints usually follow expression + pose; we use exp_alpha to keep
+            # lip-sync sharp but avoid jitter.
+            res_list[6] = ae * current[6] + (1.0 - ae) * prev[6]
 
             # Recompute R if it exists
             if len(res_list) > 7:
@@ -224,6 +238,26 @@ def _capture_source_pose(pipe) -> None:
         _source_pose[0] = (info["pitch"].copy(), info["yaw"].copy(), info["roll"].copy())
     except (AttributeError, IndexError, KeyError, TypeError) as exc:
         logger.warning("Could not capture source pose for axis-strength blend: %s", exc)
+
+
+def _install_cropper_interception(pipe) -> None:
+    """Monkey-patch cropper.crop to capture the driving frame's M_c2o."""
+    cropper = getattr(pipe, "cropper", None)
+    if cropper is None:
+        return
+    if getattr(cropper, "_intercepted", False):
+        return
+    original_crop = cropper.crop
+
+    def intercepted_crop(*args, **kwargs):
+        # Result tuple: (img_crop, M_c2o)
+        res = original_crop(*args, **kwargs)
+        if isinstance(res, (tuple, list)) and len(res) >= 2:
+            _driving_M_c2o[0] = res[1]
+        return res
+
+    cropper.crop = intercepted_crop
+    cropper._intercepted = True
 
 
 def _install_axis_strength(pipe, strengths: tuple) -> None:
@@ -287,7 +321,8 @@ class FLPFrontalizer:
         cfg_path: str = "vendor/FasterLivePortrait/configs/trt_infer.yaml",
         src_image_path: str | None = None,
         device: str = "cuda:0",
-        motion_ema_alpha: float | None = None,
+        pose_ema_alpha: float | None = None,
+        exp_ema_alpha: float | None = None,
         axis_strength: tuple[float, float, float] | None = None,
     ):
         self._device = torch.device(device)
@@ -312,12 +347,23 @@ class FLPFrontalizer:
         # motion extraction isn't blended with driving-frame extractions.
         # Reset the EMA state so the first driving frame starts clean.
         _reset_motion_smoothing()
-        alpha = (
-            motion_ema_alpha
-            if motion_ema_alpha is not None
-            else float(os.environ.get("MAXINE_FLP_MOTION_EMA", "0.3"))
+
+        # Intercept cropper to follow driving head movement
+        _install_cropper_interception(self._pipe)
+
+        # pose_alpha default: 0.1 (strong smoothing for stability)
+        # exp_alpha default: 1.0 (no smoothing for lip-sync responsiveness)
+        ap = (
+            pose_ema_alpha
+            if pose_ema_alpha is not None
+            else float(os.environ.get("FLP_POSE_EMA", os.environ.get("FLP_MOTION_EMA", "0.1")))
         )
-        _install_motion_smoothing(self._pipe, alpha=alpha)
+        ae = (
+            exp_ema_alpha
+            if exp_ema_alpha is not None
+            else float(os.environ.get("FLP_EXP_EMA", os.environ.get("FLP_MOTION_EMA", "1.0")))
+        )
+        _install_motion_smoothing(self._pipe, pose_alpha=ap, exp_alpha=ae)
 
         # Capture source pose + install per-axis strength blend.
         # Capture source pose + install per-axis strength blend. Order
@@ -370,14 +416,29 @@ class FLPFrontalizer:
             )
 
         _last_paste_back[0] = None
-        # Stash the background so our intercepting paste_back can find it.
-        # FLP's internal .run() often ignores its second argument and uses
-        # the original source image's background; we force it here.
-        _target_background[0] = frame_bgr if overlay else self._img_src
+        _driving_M_c2o[0] = None
 
         # When overlay=True, we use the live webcam frame as the background.
         # FLP's run() uses the second argument as the background for paste-back.
-        background = frame_bgr if overlay else self._img_src
+        if overlay:
+            import cv2
+
+            # Resize the driving frame to match the source portrait's dimensions
+            # so it can be used as a background for paste-back.
+            h, w = self._img_src.shape[:2]
+            if frame_bgr.shape[0] != h or frame_bgr.shape[1] != w:
+                bg_bgr = cv2.resize(frame_bgr, (w, h))
+            else:
+                bg_bgr = frame_bgr
+            background = cv2.cvtColor(bg_bgr, cv2.COLOR_BGR2RGB).astype(np.float32)
+        else:
+            background = self._img_src
+            _driving_M_c2o[0] = None  # Use source M_c2o when not overlaying
+
+        # Stash the background so our intercepting paste_back can find it.
+        # FLP's internal .run() often ignores its second argument and uses
+        # the original source image's background; we force it here.
+        _target_background[0] = background
 
         # Don't pass realtime= as kwarg — FLP's run() threads it positionally
         # into _run() internally, so a kwarg here causes a duplicate-argument

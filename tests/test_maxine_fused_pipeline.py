@@ -79,6 +79,9 @@ def test_arg_parser_required_args_present() -> None:
         "--src-image",
         "--model-dir",
         "--cfg",
+        "--flp-pose-ema",
+        "--flp-exp-ema",
+        "--flp-motion-ema",
     }
     missing = expected - registered
     assert not missing, f"Parser is missing arguments: {missing}"
@@ -99,6 +102,9 @@ def test_arg_parser_defaults() -> None:
     assert args.fps == 30
     assert args.model_dir == "/usr/local/ARSDK/lib/models"
     assert args.cfg == "vendor/FasterLivePortrait/configs/trt_infer.yaml"
+    assert args.flp_pose_ema == 0.1
+    assert args.flp_exp_ema == 1.0
+    assert args.flp_motion_ema == 0.3
 
 
 def test_arg_parser_src_image_is_required() -> None:
