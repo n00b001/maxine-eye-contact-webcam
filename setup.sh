@@ -142,7 +142,7 @@ ok "System dependencies installed"
 # ---------------------------------------------------------------------------
 info "Configuring v4l2loopback (video10=output, video11=raw)..."
 V4L2_CONF="/etc/modprobe.d/v4l2loopback.conf"
-DESIRED='options v4l2loopback devices=2 video_nr=10,11 card_label="MaxineEyeContact","MaxineRaw" exclusive_caps=1 max_buffers=2'
+DESIRED='options v4l2loopback devices=2 video_nr=10,11 card_label="MaxineEyeContact","MaxineRaw" exclusive_caps=1,0 max_buffers=8'
 if [ "$(cat "$V4L2_CONF" 2>/dev/null || true)" != "$DESIRED" ]; then
     echo "$DESIRED" | sudo tee "$V4L2_CONF" > /dev/null
     ok "Updated $V4L2_CONF"
@@ -152,7 +152,7 @@ else
 fi
 if ! lsmod | grep -q "^v4l2loopback"; then
     sudo modprobe v4l2loopback devices=2 video_nr=10,11 \
-        card_label="MaxineEyeContact","MaxineRaw" exclusive_caps=1 max_buffers=4
+        card_label="MaxineEyeContact","MaxineRaw" exclusive_caps=1,0 max_buffers=8
     ok "v4l2loopback loaded"
 else
     ok "v4l2loopback already loaded"

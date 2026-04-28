@@ -403,7 +403,7 @@ def _open_sink(
         "-f",
         "v4l2",
         "-pix_fmt",
-        "bgr24",
+        "yuv420p",
         device,
     ]
     return subprocess.Popen(
