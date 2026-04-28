@@ -35,8 +35,8 @@ Environment="MIRROR=1"
 Environment="INPUT_DEVICE=/dev/video0"
 Environment="OUTPUT_DEVICE=/dev/video10"
 # Optional device for the original unchanged video (for comparison).
-# Set to a /dev/videoX path to enable.
-Environment="OUTPUT_DEVICE_RAW="
+# Set to /dev/video11 to enable side-by-side comparison.
+Environment="OUTPUT_DEVICE_RAW=/dev/video11"
 
 # ---------------- Resolution + framerate ----------------
 # OUTPUT_WIDTH/HEIGHT = size of frames written to /dev/video10 (what
@@ -55,11 +55,13 @@ Environment="FPS=30"
 Environment="SRC_IMAGE=/app/src-portrait.jpg"
 
 # ---------------- FLP stability + per-axis strength ----------------
-# EMA smoothing alpha for FLP's motion_extractor output.
+# EMA smoothing alpha for head-pose vs expressions.
 #   1.0  = off (raw FLP, maximum responsiveness, most shimmer)
-#   0.5  = balanced
-#   0.3  = default; ~65 ms half-response at 30 fps
-#   0.1  = very smooth but noticeably laggy
+#   0.1  = strong smoothing (stable head, some lag)
+#   0.01 = very heavy smoothing
+Environment="FLP_POSE_EMA=0.1"
+Environment="FLP_EXP_EMA=1.0"
+# Legacy knob (overridden by the above if set)
 Environment="FLP_MOTION_EMA=0.3"
 # Per-axis frontalization strength. For each axis:
 #   0.0 = no correction on that axis (let driving pose pass through)

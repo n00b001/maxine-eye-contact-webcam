@@ -13,7 +13,9 @@ import sys
 import types
 from unittest import mock
 
+import numpy as np
 import pytest
+import torch
 
 # ---------------------------------------------------------------------------
 # Stub the vendor dependencies that are absent on the host / CI.
@@ -114,3 +116,169 @@ def test_frontalizer_init_without_source_raises_on_frontalize() -> None:
 def test_pull_to_numpy_debug_helper_exists() -> None:
     """pull_to_numpy is importable and is callable."""
     assert callable(pull_to_numpy)
+
+
+def test_install_motion_smoothing_calls():
+    mock_pipe = mock.MagicMock()
+    mock_ex = mock.MagicMock()
+    mock_ex._smoothed = False
+    mock_pipe.model_dict = {"motion_extractor": mock_ex}
+
+    # Test with both 1.0 (no smoothing)
+    flp_gpu_adapter._install_motion_smoothing(mock_pipe, 1.0, 1.0)
+    assert not getattr(mock_ex, "_smoothed", False)
+
+    # Test with smoothing
+    flp_gpu_adapter._install_motion_smoothing(mock_pipe, 0.5, 0.8)
+    assert mock_ex._smoothed
+
+
+def test_smoothing_logic():
+    mock_pipe = mock.MagicMock()
+    mock_ex = mock.MagicMock()
+    mock_ex._smoothed = False
+    original_predict = mock.MagicMock()
+
+    # (pitch, yaw, roll, t, exp, scale, kp, R)
+    p0 = torch.tensor([0.0])
+    y0 = torch.tensor([0.0])
+    r0 = torch.tensor([0.0])
+    t0 = torch.tensor([0.0, 0.0, 0.0])
+    e0 = torch.tensor([0.0])
+    s0 = torch.tensor([1.0])
+    k0 = torch.tensor([0.0])
+    r0_mat = torch.eye(3).unsqueeze(0)
+
+    original_predict.return_value = (p0, y0, r0, t0, e0, s0, k0, r0_mat)
+    mock_ex.predict = original_predict
+    mock_pipe.model_dict = {"motion_extractor": mock_ex}
+
+    flp_gpu_adapter._motion_prev[0] = None
+    flp_gpu_adapter._install_motion_smoothing(mock_pipe, 0.5, 1.0)
+
+    # First call sets prev
+    res1 = mock_ex.predict()
+    for i in range(len(res1)):
+        assert torch.equal(flp_gpu_adapter._motion_prev[0][i], res1[i])
+
+    # Second call smooths
+    p1 = torch.tensor([1.0])
+    e1 = torch.tensor([1.0])
+    original_predict.return_value = (p1, y0, r0, t0, e1, s0, k0, r0_mat)
+
+    res2 = mock_ex.predict()
+    # Pose alpha = 0.5: 0.5 * 1.0 + 0.5 * 0.0 = 0.5
+    assert res2[0].item() == 0.5
+    # Exp alpha = 1.0: 1.0 * 1.0 + 0.0 * 0.0 = 1.0
+    assert res2[4].item() == 1.0
+
+
+def test_headpose_predict_to_rotation_matrix():
+    hp = torch.tensor([0.0, 0.0, 0.0])
+    r_mat = flp_gpu_adapter.headpose_predict_to_rotation_matrix(hp)
+    assert torch.allclose(r_mat, torch.eye(3).unsqueeze(0))
+
+    hp2 = torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+    r2_mat = flp_gpu_adapter.headpose_predict_to_rotation_matrix(hp2)
+    assert r2_mat.shape == (2, 3, 3)
+
+
+def test_install_axis_strength():
+    mock_pipe = mock.MagicMock()
+    mock_ex = mock.MagicMock()
+    mock_ex._axis_blended = False
+    mock_pipe.model_dict = {"motion_extractor": mock_ex}
+
+    original_pred = mock.MagicMock()
+    mock_ex.predict = original_pred
+
+    flp_gpu_adapter._install_axis_strength(mock_pipe, (0.5, 0.5, 0.5))
+    assert mock_ex._axis_blended
+    assert mock_ex.predict != original_pred
+
+
+def test_axis_strength_logic():
+    mock_pipe = mock.MagicMock()
+    mock_ex = mock.MagicMock()
+    mock_ex._axis_blended = False
+    original_predict = mock.MagicMock()
+
+    res_driving = (
+        torch.tensor([1.0]),
+        torch.tensor([1.0]),
+        torch.tensor([1.0]),
+        torch.tensor([0.0]),
+        torch.tensor([0.0]),
+        torch.tensor([1.0]),
+        torch.tensor([0.0]),
+        torch.eye(3).unsqueeze(0),
+    )
+    original_predict.return_value = res_driving
+    mock_ex.predict = original_predict
+    mock_pipe.model_dict = {"motion_extractor": mock_ex}
+
+    flp_gpu_adapter._source_pose[0] = (np.array([0.0]), np.array([0.0]), np.array([0.0]))
+    flp_gpu_adapter._install_axis_strength(mock_pipe, (0.5, 0.5, 0.5))
+
+    res = mock_ex.predict()
+    assert res[0].item() == 0.5
+    assert res[1].item() == 0.5
+    assert res[2].item() == 0.5
+
+
+def test_intercepting_paste_back():
+    img_crop = torch.zeros((1, 3, 64, 64))
+    m_c2o = torch.eye(3)[:2].unsqueeze(0)
+    img_ori = torch.zeros((1, 3, 128, 128))
+    mask_ori = torch.zeros((1, 1, 128, 128))
+
+    with mock.patch("flp_gpu_adapter._original_paste_back") as mock_orig:
+        mock_orig.return_value = "success"
+
+        flp_gpu_adapter._target_background[0] = None
+        flp_gpu_adapter._driving_m_c2o[0] = None
+        res = flp_gpu_adapter._intercepting_paste_back(img_crop, m_c2o, img_ori, mask_ori)
+        assert res == "success"
+        mock_orig.assert_called_with(img_crop, m_c2o, img_ori, mask_ori)
+
+        driving_m = np.eye(3)[:2].reshape(1, 2, 3) * 2.0
+        flp_gpu_adapter._driving_m_c2o[0] = driving_m
+        flp_gpu_adapter._target_background[0] = img_ori
+        flp_gpu_adapter._intercepting_paste_back(img_crop, m_c2o, img_ori, mask_ori)
+        args, _kwargs = mock_orig.call_args
+        assert torch.allclose(args[1], torch.from_numpy(driving_m))
+
+
+def test_frontalizer_frontalize_path():
+    # Mock cv2
+    mock_cv2 = mock.MagicMock()
+    with (
+        mock.patch.dict(sys.modules, {"cv2": mock_cv2}),
+        mock.patch("flp_gpu_adapter.FasterLivePortraitPipeline") as mock_pipe_class,
+        mock.patch("flp_gpu_adapter.OmegaConf"),
+        mock.patch("torch.cuda.set_device"),
+    ):
+        mock_pipe = mock_pipe_class.return_value
+        mock_pipe.prepare_source.return_value = True
+        mock_pipe.src_infos = [
+            [{"pitch": np.array([0.0]), "yaw": np.array([0.0]), "roll": np.array([0.0])}]
+        ]
+        mock_cv2.imread.return_value = np.zeros((100, 100, 3), dtype=np.uint8)
+        mock_cv2.cvtColor.return_value = np.zeros((100, 100, 3), dtype=np.float32)
+
+        # Reset stashed state
+        flp_gpu_adapter._last_paste_back[0] = None
+
+        frontalizer = flp_gpu_adapter.FLPFrontalizer(src_image_path="dummy.jpg")
+
+        # Mock pipe.run to set _last_paste_back[0] as side effect
+        def mock_run(frame, bg, info):
+            flp_gpu_adapter._last_paste_back[0] = torch.tensor([1.0])
+            return (None, None, "not_none", None)
+
+        mock_pipe.run.side_effect = mock_run
+
+        dummy_frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        res = frontalizer.frontalize(dummy_frame, overlay=True)
+        assert res is not None
+        assert res.item() == 1.0

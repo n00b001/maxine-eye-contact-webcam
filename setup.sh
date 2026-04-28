@@ -136,14 +136,13 @@ fi
 ok "System dependencies installed"
 
 # ---------------------------------------------------------------------------
-# 2. v4l2loopback – single output device
+# 2. v4l2loopback – output devices
 #    video10 = final output (exclusive_caps=1: clean Zoom/Chrome detection)
-#    The pre-4c38c7b intermediate hop (video11) is no longer needed in the
-#    unified GPU pipeline; only video10 is required.
+#    video11 = raw comparison stream (optional)
 # ---------------------------------------------------------------------------
-info "Configuring v4l2loopback (video10=output)..."
+info "Configuring v4l2loopback (video10=output, video11=raw)..."
 V4L2_CONF="/etc/modprobe.d/v4l2loopback.conf"
-DESIRED='options v4l2loopback devices=1 video_nr=10 card_label="MaxineEyeContact" exclusive_caps=1 max_buffers=2'
+DESIRED='options v4l2loopback devices=2 video_nr=10,11 card_label="MaxineEyeContact","MaxineRaw" exclusive_caps=1 max_buffers=2'
 if [ "$(cat "$V4L2_CONF" 2>/dev/null || true)" != "$DESIRED" ]; then
     echo "$DESIRED" | sudo tee "$V4L2_CONF" > /dev/null
     ok "Updated $V4L2_CONF"
@@ -152,8 +151,8 @@ else
     ok "$V4L2_CONF already correct"
 fi
 if ! lsmod | grep -q "^v4l2loopback"; then
-    sudo modprobe v4l2loopback devices=1 video_nr=10 \
-        card_label="MaxineEyeContact" exclusive_caps=1 max_buffers=4
+    sudo modprobe v4l2loopback devices=2 video_nr=10,11 \
+        card_label="MaxineEyeContact","MaxineRaw" exclusive_caps=1 max_buffers=4
     ok "v4l2loopback loaded"
 else
     ok "v4l2loopback already loaded"
@@ -161,6 +160,7 @@ fi
 MODULES_LOAD="/etc/modules-load.d/v4l2loopback.conf"
 [ -f "$MODULES_LOAD" ] || { echo "v4l2loopback" | sudo tee "$MODULES_LOAD" > /dev/null; ok "Created $MODULES_LOAD"; }
 if [ -e /dev/video10 ]; then ok "Ready: /dev/video10"; else warn "/dev/video10 not found — check dmesg"; fi
+if [ -e /dev/video11 ]; then ok "Ready: /dev/video11"; else warn "/dev/video11 not found — check dmesg"; fi
 
 # ---------------------------------------------------------------------------
 # 3. Pull GHCR image

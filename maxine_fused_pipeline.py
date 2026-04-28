@@ -186,11 +186,25 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # ---------------- FLP stability + per-axis strength ----------------
     p.add_argument(
+        "--flp-pose-ema",
+        type=float,
+        default=_env_float("FLP_POSE_EMA", 0.1),
+        metavar="ALPHA",
+        help="EMA alpha for head-pose smoothing (pitch/yaw/roll/t/scale) (env: FLP_POSE_EMA)",
+    )
+    p.add_argument(
+        "--flp-exp-ema",
+        type=float,
+        default=_env_float("FLP_EXP_EMA", 1.0),
+        metavar="ALPHA",
+        help="EMA alpha for expression smoothing (mouth/eyes) (env: FLP_EXP_EMA)",
+    )
+    p.add_argument(
         "--flp-motion-ema",
         type=float,
         default=_env_float("FLP_MOTION_EMA", 0.3),
         metavar="ALPHA",
-        help="EMA alpha for motion smoothing; 1.0 disables (env: FLP_MOTION_EMA)",
+        help="Legacy EMA alpha; overrides specific EMAs if set (env: FLP_MOTION_EMA)",
     )
     p.add_argument(
         "--flp-pitch-strength",
@@ -505,11 +519,27 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 (complexity is pipeline
             try:
                 from flp_gpu_adapter import FLPFrontalizer
 
+                # If the specific pose/exp flags are at their defaults, but the
+                # legacy motion flag is NOT at its default (0.3), we use the
+                # legacy flag for both to preserve old behavior.
+                pose_ema = args.flp_pose_ema
+                exp_ema = args.flp_exp_ema
+                if (
+                    pose_ema == 0.1
+                    and exp_ema == 1.0
+                    and args.flp_motion_ema != 0.3
+                    and _env("FLP_POSE_EMA", None) is None
+                    and _env("FLP_EXP_EMA", None) is None
+                ):
+                    pose_ema = args.flp_motion_ema
+                    exp_ema = args.flp_motion_ema
+
                 frontalizer = FLPFrontalizer(
                     cfg_path=args.cfg,
                     src_image_path=args.src_image,
                     device="cuda:0",
-                    motion_ema_alpha=args.flp_motion_ema,
+                    pose_ema_alpha=pose_ema,
+                    exp_ema_alpha=exp_ema,
                     axis_strength=(
                         args.flp_pitch_strength,
                         args.flp_yaw_strength,
