@@ -72,7 +72,7 @@ logger = logging.getLogger(__name__)
 
 _last_paste_back: list[torch.Tensor | None] = [None]
 _target_background: list[torch.Tensor | np.ndarray | None] = [None]
-_driving_M_c2o: list[np.ndarray | None] = [None]  # Stash M_c2o from cropper
+_driving_m_c2o: list[np.ndarray | None] = [None]  # Stash M_c2o from cropper
 _original_paste_back = _flp_pipe_mod.paste_back_pytorch
 
 
@@ -94,8 +94,8 @@ def _intercepting_paste_back(img_crop, M_c2o, img_ori, mask_ori):  # noqa: N803
     # When overlaying, use the M_c2o matrix captured from the driving frame
     # so the face follows the user's current position/scale.
     m_use = M_c2o
-    if _driving_M_c2o[0] is not None and _target_background[0] is not None:
-        m_use = torch.from_numpy(_driving_M_c2o[0]).to(img_crop.device, non_blocking=True)
+    if _driving_m_c2o[0] is not None and _target_background[0] is not None:
+        m_use = torch.from_numpy(_driving_m_c2o[0]).to(img_crop.device, non_blocking=True)
 
     result = _original_paste_back(img_crop, m_use, bg, mask_ori)
     _last_paste_back[0] = result
@@ -253,7 +253,7 @@ def _install_cropper_interception(pipe) -> None:
         # Result tuple: (img_crop, M_c2o)
         res = original_crop(*args, **kwargs)
         if isinstance(res, (tuple, list)) and len(res) >= 2:
-            _driving_M_c2o[0] = res[1]
+            _driving_m_c2o[0] = res[1]
         return res
 
     cropper.crop = intercepted_crop
@@ -416,7 +416,7 @@ class FLPFrontalizer:
             )
 
         _last_paste_back[0] = None
-        _driving_M_c2o[0] = None
+        _driving_m_c2o[0] = None
 
         # When overlay=True, we use the live webcam frame as the background.
         # FLP's run() uses the second argument as the background for paste-back.
@@ -433,7 +433,7 @@ class FLPFrontalizer:
             background = cv2.cvtColor(bg_bgr, cv2.COLOR_BGR2RGB).astype(np.float32)
         else:
             background = self._img_src
-            _driving_M_c2o[0] = None  # Use source M_c2o when not overlaying
+            _driving_m_c2o[0] = None  # Use source M_c2o when not overlaying
 
         # Stash the background so our intercepting paste_back can find it.
         # FLP's internal .run() often ignores its second argument and uses

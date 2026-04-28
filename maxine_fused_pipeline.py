@@ -204,7 +204,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=_env_float("FLP_MOTION_EMA", 0.3),
         metavar="ALPHA",
-        help="Legacy EMA alpha; overridden by --flp-pose-ema/--flp-exp-ema if set (env: FLP_MOTION_EMA)",
+        help="Legacy EMA alpha; overrides specific EMAs if set (env: FLP_MOTION_EMA)",
     )
     p.add_argument(
         "--flp-pitch-strength",

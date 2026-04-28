@@ -13,9 +13,9 @@ import sys
 import types
 from unittest import mock
 
-import torch
 import numpy as np
 import pytest
+import torch
 
 # ---------------------------------------------------------------------------
 # Stub the vendor dependencies that are absent on the host / CI.
@@ -147,9 +147,9 @@ def test_smoothing_logic():
     e0 = torch.tensor([0.0])
     s0 = torch.tensor([1.0])
     k0 = torch.tensor([0.0])
-    R0 = torch.eye(3).unsqueeze(0)
+    r0_mat = torch.eye(3).unsqueeze(0)
 
-    original_predict.return_value = (p0, y0, r0, t0, e0, s0, k0, R0)
+    original_predict.return_value = (p0, y0, r0, t0, e0, s0, k0, r0_mat)
     mock_ex.predict = original_predict
     mock_pipe.model_dict = {"motion_extractor": mock_ex}
 
@@ -164,7 +164,7 @@ def test_smoothing_logic():
     # Second call smooths
     p1 = torch.tensor([1.0])
     e1 = torch.tensor([1.0])
-    original_predict.return_value = (p1, y0, r0, t0, e1, s0, k0, R0)
+    original_predict.return_value = (p1, y0, r0, t0, e1, s0, k0, r0_mat)
 
     res2 = mock_ex.predict()
     # Pose alpha = 0.5: 0.5 * 1.0 + 0.5 * 0.0 = 0.5
@@ -175,12 +175,12 @@ def test_smoothing_logic():
 
 def test_headpose_predict_to_rotation_matrix():
     hp = torch.tensor([0.0, 0.0, 0.0])
-    R = flp_gpu_adapter.headpose_predict_to_rotation_matrix(hp)
-    assert torch.allclose(R, torch.eye(3).unsqueeze(0))
+    r_mat = flp_gpu_adapter.headpose_predict_to_rotation_matrix(hp)
+    assert torch.allclose(r_mat, torch.eye(3).unsqueeze(0))
 
     hp2 = torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
-    R2 = flp_gpu_adapter.headpose_predict_to_rotation_matrix(hp2)
-    assert R2.shape == (2, 3, 3)
+    r2_mat = flp_gpu_adapter.headpose_predict_to_rotation_matrix(hp2)
+    assert r2_mat.shape == (2, 3, 3)
 
 
 def test_install_axis_strength():
@@ -228,7 +228,7 @@ def test_axis_strength_logic():
 
 def test_intercepting_paste_back():
     img_crop = torch.zeros((1, 3, 64, 64))
-    M_c2o = torch.eye(3)[:2].unsqueeze(0)
+    m_c2o = torch.eye(3)[:2].unsqueeze(0)
     img_ori = torch.zeros((1, 3, 128, 128))
     mask_ori = torch.zeros((1, 1, 128, 128))
 
@@ -236,17 +236,17 @@ def test_intercepting_paste_back():
         mock_orig.return_value = "success"
 
         flp_gpu_adapter._target_background[0] = None
-        flp_gpu_adapter._driving_M_c2o[0] = None
-        res = flp_gpu_adapter._intercepting_paste_back(img_crop, M_c2o, img_ori, mask_ori)
+        flp_gpu_adapter._driving_m_c2o[0] = None
+        res = flp_gpu_adapter._intercepting_paste_back(img_crop, m_c2o, img_ori, mask_ori)
         assert res == "success"
-        mock_orig.assert_called_with(img_crop, M_c2o, img_ori, mask_ori)
+        mock_orig.assert_called_with(img_crop, m_c2o, img_ori, mask_ori)
 
-        driving_M = np.eye(3)[:2].reshape(1, 2, 3) * 2.0
-        flp_gpu_adapter._driving_M_c2o[0] = driving_M
+        driving_m = np.eye(3)[:2].reshape(1, 2, 3) * 2.0
+        flp_gpu_adapter._driving_m_c2o[0] = driving_m
         flp_gpu_adapter._target_background[0] = img_ori
-        flp_gpu_adapter._intercepting_paste_back(img_crop, M_c2o, img_ori, mask_ori)
-        args, kwargs = mock_orig.call_args
-        assert torch.allclose(args[1], torch.from_numpy(driving_M))
+        flp_gpu_adapter._intercepting_paste_back(img_crop, m_c2o, img_ori, mask_ori)
+        args, _kwargs = mock_orig.call_args
+        assert torch.allclose(args[1], torch.from_numpy(driving_m))
 
 
 def test_frontalizer_frontalize_path():
@@ -255,7 +255,7 @@ def test_frontalizer_frontalize_path():
     with (
         mock.patch.dict(sys.modules, {"cv2": mock_cv2}),
         mock.patch("flp_gpu_adapter.FasterLivePortraitPipeline") as mock_pipe_class,
-        mock.patch("flp_gpu_adapter.OmegaConf") as mock_cfg,
+        mock.patch("flp_gpu_adapter.OmegaConf"),
         mock.patch("torch.cuda.set_device"),
     ):
         mock_pipe = mock_pipe_class.return_value
